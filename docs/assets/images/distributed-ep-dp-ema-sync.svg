@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" font-family="Segoe UI, Inter, Arial, sans-serif">
+  <defs>
+    <marker id="arrD" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,1 L7,4 L0,7 Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrO" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,1 L7,4 L0,7 Z" fill="#fb923c"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="400" rx="14" fill="#0f172a"/>
+  <text x="480" y="32" text-anchor="middle" fill="#f8fafc" font-size="17" font-weight="700">Distributed DP / EP Synchronization Protocol (&lt; 0.01% Overhead)</text>
+  <text x="480" y="52" text-anchor="middle" fill="#94a3b8" font-size="11.5">Bit-identical dynamic expert splits across multi-GPU Data Parallel (DP) and Expert Parallel (EP) ranks</text>
+
+  <!-- Ranks -->
+  <rect x="28" y="80" width="210" height="130" rx="8" fill="#1e293b" stroke="#38bdf8"/>
+  <text x="133" y="102" text-anchor="middle" fill="#7dd3fc" font-size="12" font-weight="700">GPU Rank 0..R-1 (Every Step)</text>
+  <text x="42" y="124" fill="#e2e8f0" font-size="10">1. Local Top-K_r dispatch</text>
+  <text x="42" y="142" fill="#e2e8f0" font-size="10">2. Compute local stats:</text>
+  <text x="52" y="158" fill="#a7f3d0" font-size="9.5">n_local (E,) FP32</text>
+  <text x="52" y="173" fill="#a7f3d0" font-size="9.5">s_local (E,) FP32</text>
+  <text x="42" y="194" fill="#fde68a" font-size="9.5">Payload size: 2 * E * 4B &lt; 1 KB!</text>
+
+  <line x1="238" y1="145" x2="296" y2="145" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrD)"/>
+
+  <!-- All Reduce -->
+  <rect x="300" y="88" width="185" height="114" rx="8" fill="#172554" stroke="#60a5fa"/>
+  <text x="392" y="112" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="700">Async All-Reduce</text>
+  <text x="392" y="132" text-anchor="middle" fill="#e2e8f0" font-size="10">dist.all_reduce(AVG)</text>
+  <text x="392" y="150" text-anchor="middle" fill="#cbd5e1" font-size="9.8">Over tiny E-length vectors</text>
+  <text x="392" y="172" text-anchor="middle" fill="#6ee7b7" font-size="9.8">All ranks hold identical</text>
+  <text x="392" y="187" text-anchor="middle" fill="#6ee7b7" font-size="9.8">ema_load N &amp; ema_energy S</text>
+
+  <line x1="485" y1="145" x2="540" y2="145" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrD)"/>
+
+  <!-- Rank 0 coordinator -->
+  <rect x="544" y="80" width="195" height="130" rx="8" fill="#1e293b" stroke="#f472b6"/>
+  <text x="641" y="102" text-anchor="middle" fill="#f9a8d4" font-size="12" font-weight="700">Rank 0 Split Coordinator</text>
+  <text x="558" y="124" fill="#e2e8f0" font-size="9.8">Every M_split steps:</text>
+  <text x="558" y="142" fill="#e2e8f0" font-size="9.8">Check N_j &lt; tau*(K_r/E)</text>
+  <text x="558" y="160" fill="#e2e8f0" font-size="9.8">Pick (dead_idx, donor_idx)</text>
+  <text x="558" y="178" fill="#e2e8f0" font-size="9.8">&amp; shared RNG seed</text>
+  <text x="558" y="196" fill="#fde68a" font-size="9.5">Zero divergence between ranks!</text>
+
+  <line x1="739" y1="145" x2="788" y2="145" stroke="#fb923c" stroke-width="2" marker-end="url(#arrO)"/>
+
+  <!-- Broadcast -->
+  <rect x="792" y="88" width="142" height="114" rx="8" fill="#431407" stroke="#fb923c"/>
+  <text x="863" y="114" text-anchor="middle" fill="#fed7aa" font-size="11.5" font-weight="700">Broadcast Pairs</text>
+  <text x="863" y="135" text-anchor="middle" fill="#ffedd5" font-size="9.8">dist.broadcast_obj</text>
+  <text x="863" y="153" text-anchor="middle" fill="#ffedd5" font-size="9.8">[(dead, donor, seed)]</text>
+  <text x="863" y="178" text-anchor="middle" fill="#fdba74" font-size="9.5">Synchronized across</text>
+  <text x="863" y="192" text-anchor="middle" fill="#fdba74" font-size="9.5">DP &amp; EP ranks</text>
+
+  <!-- Bottom Row: DP vs EP Execution -->
+  <rect x="28" y="240" width="435" height="132" rx="8" fill="#064e3b" stroke="#10b981"/>
+  <text x="245" y="264" text-anchor="middle" fill="#6ee7b7" font-size="12.5" font-weight="700">Mode A: Data Parallel / FSDP (Experts Replicated or FSDP)</text>
+  <text x="44" y="286" fill="#ecfdf5" font-size="10.2">- Every rank executes deterministic clone + orthogonal noise with broadcast seed.</text>
+  <text x="44" y="305" fill="#ecfdf5" font-size="10.2">- Zero point-to-point expert weight transfer needed (pure local copy).</text>
+  <text x="44" y="324" fill="#ecfdf5" font-size="10.2">- Compatible with HuggingFace Gemma + PyTorch DDP / FSDP2.</text>
+  <text x="44" y="346" fill="#a7f3d0" font-size="9.8">Used in: Gemma-2-2B / 1.3B proxy runs on 1x8 H100 node.</text>
+
+  <rect x="492" y="240" width="442" height="132" rx="8" fill="#31102f" stroke="#ec4899"/>
+  <text x="713" y="264" text-anchor="middle" fill="#f9a8d4" font-size="12.5" font-weight="700">Mode B: Expert Parallelism (Experts Sharded Across GPUs)</text>
+  <text x="508" y="286" fill="#fdf2f8" font-size="10.2">- If donor lives on EP rank r_src and dead lives on EP rank r_dst:</text>
+  <text x="508" y="305" fill="#fdf2f8" font-size="10.2">- Single NCCL send/recv copies (gate, up, down) + Adam (m, v) once per split.</text>
+  <text x="508" y="324" fill="#fdf2f8" font-size="10.2">- Amortized across M_split = 200 steps -&gt; &lt; 0.01% step latency overhead.</text>
+  <text x="508" y="346" fill="#fbcfe8" font-size="9.8">Used in: 7B+ / Gemma-2-9B MoE (E=64, K_r=4) multi-node scaling.</text>
+</svg>

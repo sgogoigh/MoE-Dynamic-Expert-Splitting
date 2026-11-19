@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" font-family="Segoe UI, Inter, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <marker id="arrBlue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,1 L7,4 L0,7 Z" fill="#60a5fa"/>
+    </marker>
+    <marker id="arrEmerald" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,1 L7,4 L0,7 Z" fill="#34d399"/>
+    </marker>
+    <marker id="arrAmber" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,1 L7,4 L0,7 Z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <rect width="980" height="540" rx="14" fill="url(#bgGrad)"/>
+  <text x="490" y="34" text-anchor="middle" fill="#f8fafc" font-size="18" font-weight="700">Pretrained Gemma (GeGLU) to Auxiliary-Loss-Free MoE Upcycling &amp; Dynamic Splitting</text>
+  <text x="490" y="54" text-anchor="middle" fill="#94a3b8" font-size="11.5">Zero-download offline-verifiable upcycling pipeline for Gemma-3-1B / Gemma-2-2B / Gemma-2-9B architectures</text>
+
+  <!-- Left Panel: Dense Gemma Decoder Layer -->
+  <rect x="26" y="76" width="265" height="430" rx="10" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
+  <text x="158" y="102" text-anchor="middle" fill="#93c5fd" font-size="13.5" font-weight="700">Dense Gemma Decoder Block</text>
+
+  <rect x="46" y="118" width="225" height="44" rx="7" fill="#0f172a" stroke="#64748b"/>
+  <text x="158" y="137" text-anchor="middle" fill="#e2e8f0" font-size="11.5" font-weight="600">GemmaRMSNorm (1 + w)</text>
+  <text x="158" y="153" text-anchor="middle" fill="#94a3b8" font-size="10">Unit-offset zero-init weight norm</text>
+
+  <line x1="158" y1="162" x2="158" y2="180" stroke="#60a5fa" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+
+  <rect x="46" y="182" width="225" height="54" rx="7" fill="#0f172a" stroke="#64748b"/>
+  <text x="158" y="202" text-anchor="middle" fill="#e2e8f0" font-size="11.5" font-weight="600">Grouped-Query Attention (GQA)</text>
+  <text x="158" y="218" text-anchor="middle" fill="#94a3b8" font-size="9.8">RoPE + optional attn logit soft-cap</text>
+  <text x="158" y="231" text-anchor="middle" fill="#6ee7b7" font-size="9.5">Weights preserved / frozen or tuned</text>
+
+  <line x1="158" y1="236" x2="158" y2="254" stroke="#60a5fa" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+
+  <rect x="46" y="256" width="225" height="42" rx="7" fill="#0f172a" stroke="#64748b"/>
+  <text x="158" y="274" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">Post-Attn &amp; Pre-FFN RMSNorm</text>
+  <text x="158" y="289" text-anchor="middle" fill="#94a3b8" font-size="9.8">Preserves residual scale</text>
+
+  <line x1="158" y1="298" x2="158" y2="316" stroke="#60a5fa" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+
+  <rect x="46" y="318" width="225" height="106" rx="8" fill="#172554" stroke="#3b82f6" stroke-width="1.6"/>
+  <text x="158" y="340" text-anchor="middle" fill="#bfdbfe" font-size="12" font-weight="700">Dense GeGLU MLP (Target)</text>
+  <text x="158" y="360" text-anchor="middle" fill="#cbd5e1" font-size="10.2">gate_proj: d -&gt; D_ff</text>
+  <text x="158" y="376" text-anchor="middle" fill="#cbd5e1" font-size="10.2">up_proj:   d -&gt; D_ff</text>
+  <text x="158" y="392" text-anchor="middle" fill="#cbd5e1" font-size="10.2">down_proj: D_ff -&gt; d</text>
+  <text x="158" y="411" text-anchor="middle" fill="#fbbf24" font-size="10">gelu_pytorch_tanh(gate) * up</text>
+
+  <rect x="46" y="438" width="225" height="50" rx="7" fill="#0f172a" stroke="#475569"/>
+  <text x="158" y="458" text-anchor="middle" fill="#cbd5e1" font-size="10.5" font-weight="600">Post-FFN RMSNorm + Residual</text>
+  <text x="158" y="475" text-anchor="middle" fill="#94a3b8" font-size="9.5">Standard Gemma 2 / 3 layer exit</text>
+
+  <!-- Upcycling Arrow Bridge -->
+  <path d="M 294 371 L 342 371" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arrAmber)"/>
+  <text x="318" y="348" text-anchor="middle" fill="#fcd34d" font-size="10" font-weight="700">Sparse</text>
+  <text x="318" y="361" text-anchor="middle" fill="#fcd34d" font-size="10" font-weight="700">Upcycle</text>
+
+  <!-- Right Panel: Gemma-eMoE Architecture -->
+  <rect x="348" y="76" width="606" height="430" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="1.6"/>
+  <text x="651" y="102" text-anchor="middle" fill="#6ee7b7" font-size="14" font-weight="700">Upcycled Gemma-eMoE Block (Auxiliary-Loss-Free + Dynamic Splitting)</text>
+
+  <!-- Upcycling Strategies Box -->
+  <rect x="368" y="118" width="566" height="74" rx="8" fill="#0f172a" stroke="#334155"/>
+  <text x="651" y="137" text-anchor="middle" fill="#fcd34d" font-size="11.5" font-weight="700">3 Offline-Tested Upcycling Initializers (Zero Download Needed)</text>
+  <text x="384" y="156" fill="#e2e8f0" font-size="10">1. noisy_clone: Full GeGLU cloned to E experts (+/- noise) -&gt; identical function at eps=0</text>
+  <text x="384" y="172" fill="#e2e8f0" font-size="10">2. sliced_granular: Split D_ff across K_r sub-experts -&gt; exact active FLOP parity with dense Gemma</text>
+  <text x="384" y="186" fill="#e2e8f0" font-size="10">3. progressive_split: Seed K_0 active + (E-K_0) low-bias dormant slots -&gt; data-driven expansion</text>
+
+  <!-- Router Box -->
+  <rect x="368" y="206" width="270" height="128" rx="8" fill="#172554" stroke="#60a5fa" stroke-width="1.4"/>
+  <text x="503" y="227" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="700">EMeansMoERouter</text>
+  <text x="503" y="246" text-anchor="middle" fill="#f8fafc" font-size="10.2">z = (W_r x + b) / tau_r</text>
+  <text x="503" y="264" text-anchor="middle" fill="#cbd5e1" font-size="10">Top-K_r Gate (No Aux Loss!)</text>
+  <text x="503" y="284" text-anchor="middle" fill="#a7f3d0" font-size="10">FP32 EMA Buffers:</text>
+  <text x="503" y="300" text-anchor="middle" fill="#6ee7b7" font-size="9.8">ema_load N_j &amp; ema_energy S_j</text>
+  <text x="503" y="317" text-anchor="middle" fill="#fde68a" font-size="9.5">alpha(t) cosine -&gt; alpha_min floor</text>
+
+  <!-- Experts Bank Box -->
+  <rect x="664" y="206" width="270" height="128" rx="8" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+  <text x="799" y="227" text-anchor="middle" fill="#6ee7b7" font-size="12" font-weight="700">E GeGLU Experts Bank</text>
+  <rect x="678" y="240" width="54" height="58" rx="5" fill="#022c22" stroke="#10b981"/>
+  <text x="705" y="263" text-anchor="middle" fill="#ecfdf5" font-size="10" font-weight="700">Exp 1</text>
+  <text x="705" y="279" text-anchor="middle" fill="#6ee7b7" font-size="8.8">Donor*</text>
+  <text x="705" y="291" text-anchor="middle" fill="#fcd34d" font-size="8.5">Hot</text>
+
+  <rect x="740" y="240" width="54" height="58" rx="5" fill="#022c22" stroke="#10b981"/>
+  <text x="767" y="263" text-anchor="middle" fill="#ecfdf5" font-size="10" font-weight="700">Exp 2</text>
+  <text x="767" y="279" text-anchor="middle" fill="#a7f3d0" font-size="8.8">Active</text>
+
+  <rect x="802" y="240" width="54" height="58" rx="5" fill="#022c22" stroke="#10b981"/>
+  <text x="829" y="263" text-anchor="middle" fill="#ecfdf5" font-size="10" font-weight="700">...</text>
+  <text x="829" y="279" text-anchor="middle" fill="#a7f3d0" font-size="8.8">Active</text>
+
+  <rect x="864" y="240" width="56" height="58" rx="5" fill="#450a0a" stroke="#f87171" stroke-dasharray="3 2"/>
+  <text x="892" y="263" text-anchor="middle" fill="#fecaca" font-size="10" font-weight="700">Exp E</text>
+  <text x="892" y="279" text-anchor="middle" fill="#fca5a5" font-size="8.8">Dead</text>
+  <text x="892" y="291" text-anchor="middle" fill="#f87171" font-size="8.5">N &lt; 0.1 N*</text>
+
+  <text x="799" y="320" text-anchor="middle" fill="#d1fae5" font-size="9.5">Dispatch tokens -&gt; GeGLU -&gt; Weighted Sum</text>
+
+  <line x1="638" y1="270" x2="660" y2="270" stroke="#34d399" stroke-width="2" marker-end="url(#arrEmerald)"/>
+
+  <!-- Dynamic Splitter Action Box -->
+  <rect x="368" y="352" width="566" height="136" rx="8" fill="#1e1b4b" stroke="#f472b6" stroke-width="1.5"/>
+  <text x="651" y="375" text-anchor="middle" fill="#f9a8d4" font-size="12.5" font-weight="700">DynamicExpertSplitter (Periodic Hook every M_split steps)</text>
+  <text x="386" y="397" fill="#e2e8f0" font-size="10.2">1. Flag dead experts: N_j &lt; split_tau * (K_r / E) and cooldown[j] == 0</text>
+  <text x="386" y="415" fill="#e2e8f0" font-size="10.2">2. Pick overloaded donor j* weighted by ema_energy S_j* (or ema_load N_j*)</text>
+  <text x="386" y="433" fill="#fde68a" font-size="10.2" font-weight="600">3. Clone GeGLU weights + orthogonal delta*W_perp; shift b_j*, b_dead &lt;- b_j* - tau_r*ln(2)</text>
+  <text x="386" y="451" fill="#6ee7b7" font-size="10.2">4. Halve EMA N, S -&gt; N/2, S/2; copy AdamW (m, v) buffers; activate cooldown (2 * M_split)</text>
+  <text x="386" y="471" fill="#93c5fd" font-size="10">Guarantee: Zero loss discontinuity at split step + automatic capacity growth onto hot domains</text>
+
+  <line x1="503" y1="334" x2="503" y2="349" stroke="#60a5fa" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+  <line x1="799" y1="352" x2="799" y2="337" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrEmerald)"/>
+</svg>

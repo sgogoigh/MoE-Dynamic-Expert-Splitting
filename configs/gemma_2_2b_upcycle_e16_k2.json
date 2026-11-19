@@ -1,0 +1,33 @@
+{
+  "model_preset": "gemma-2-2b",
+  "hf_model_id_reference": "google/gemma-2-2b",
+  "download_weights": false,
+  "moe": {
+    "num_experts": 16,
+    "top_k": 2,
+    "router_mode": "emeans",
+    "tau_r": 1.0,
+    "renorm_topk_weights": true,
+    "alpha_0": 0.05,
+    "alpha_min": 0.004,
+    "split_interval": 200,
+    "split_tau": 0.1,
+    "donor_min_mult": 1.25,
+    "donor_weight_by": "energy",
+    "max_splits_per_step": 4,
+    "orthogonal_eps": 0.001,
+    "router_noise_eps": 0.0001,
+    "cooldown_steps": 400,
+    "upcycle_strategy": "noisy_clone",
+    "upcycle_init_noise": 0.001
+  },
+  "training": {
+    "global_batch_tokens": 1048576,
+    "seq_len": 4096,
+    "target_tokens": 30000000000,
+    "optimizer": "AdamW",
+    "lr": 0.0001,
+    "precision": "bf16",
+    "hardware_estimate": "8x H100 (80GB SXM5)"
+  }
+}

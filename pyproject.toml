@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moe-dynamic-expert-splitting"
+version = "0.1.0"
+description = "Auxiliary-loss-free Sparse MoE routing and Gemma upcycling via e-means dynamic expert splitting"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.3.0",
+    "transformers>=4.49.0",
+    "accelerate>=1.0.0",
+    "safetensors>=0.4.3",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
