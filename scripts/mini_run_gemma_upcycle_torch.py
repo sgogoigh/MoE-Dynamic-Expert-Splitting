@@ -41,14 +41,16 @@ def main():
     spec = GEMMA_PRESETS[cfg_json["model_preset"]]
 
     # Step 1: Build offline synthetic dense Gemma & inspect dense->MoE exactness
-    dense_gemma = TinyGemmaForCausalLM(spec).to(device)
+    dense_gemma = TinyGemmaForCausalLM(spec)
+    dense_gemma.to(device)
     tokens = torch.randint(0, spec.vocab_size, (8, 32), device=device)
 
     with torch.no_grad():
         dense_logits = dense_gemma(tokens)
 
     exact_cfg = EMeansMoEConfig(num_experts=8, top_k=2, upcycle_strategy="noisy_clone", upcycle_init_noise=0.0)
-    moe_exact = upcycle_gemma_model(dense_gemma, exact_cfg).to(device)
+    moe_exact = upcycle_gemma_model(dense_gemma, exact_cfg)
+    moe_exact.to(device)
     with torch.no_grad():
         moe_logits, _ = moe_exact(tokens)
     parity_diff = (dense_logits - moe_logits).abs().max().item()
@@ -62,7 +64,8 @@ def main():
     moe_cfg.split_interval = 10
     moe_cfg.cooldown_steps = 15
 
-    model = upcycle_gemma_model(dense_gemma, moe_cfg).to(device)
+    model = upcycle_gemma_model(dense_gemma, moe_cfg)
+    model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg_json["training"]["lr"], weight_decay=0.01)
     total_steps = 50
 
@@ -89,7 +92,7 @@ def main():
                 f"pre_loss={loss.item():.4f} -> post_loss={post_loss.item():.4f}"
             )
         elif step in (1, 10, 25, 50):
-            h0 = compute_routing_health(model.layers[0].mlp.router.ema_load, top_k=moe_cfg.top_k, dead_tau=moe_cfg.split_tau)
+            h0 = compute_routing_health(model.iter_moe_layers()[0].mlp.router.ema_load, top_k=moe_cfg.top_k, dead_tau=moe_cfg.split_tau)
             print(
                 f"  Step {step:02d}: loss={loss.item():.4f} | L0 max/mean={h0['max_to_mean']:.2f}x | "
                 f"L0 dead={int(h0['dead_count'])}/{moe_cfg.num_experts} | L0 entropy={h0['norm_entropy']:.3f}"

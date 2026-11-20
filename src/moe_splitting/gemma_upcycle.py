@@ -5,7 +5,7 @@ Runs 100% offline with synthetic weights; never downloads remote HuggingFace wei
 
 import copy
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast, overload
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -183,6 +183,8 @@ class TinyGemmaForCausalLM(nn.Module):
 class TinyGemmaMoEForCausalLM(nn.Module):
     """MoE-upcycled Gemma CausalLM with unified EMA step updates & split hooks."""
 
+    splitter: DynamicExpertSplitter
+
     def __init__(self, dense_model: TinyGemmaForCausalLM, moe_cfg: EMeansMoEConfig):
         super().__init__()
         self.spec = dense_model.spec
@@ -213,6 +215,14 @@ class TinyGemmaMoEForCausalLM(nn.Module):
             logits = cap * torch.tanh(logits / cap)
         return logits, total_aux
 
+    def set_splitter(self, splitter: DynamicExpertSplitter) -> None:
+        """Replace the dynamic expert splitter cleanly without triggering Module.__setattr__ warnings."""
+        object.__setattr__(self, "splitter", splitter)
+
+    def iter_moe_layers(self) -> List[GemmaMoEDecoderLayer]:
+        """Return concretely typed GemmaMoEDecoderLayer list for static type checkers."""
+        return [cast(GemmaMoEDecoderLayer, layer) for layer in self.layers]
+
     @torch.no_grad()
     def step_ema_and_split(
         self,
@@ -222,7 +232,7 @@ class TinyGemmaMoEForCausalLM(nn.Module):
     ) -> List[SplitEvent]:
         """Update per-layer EMA stats and trigger DynamicExpertSplitter when due."""
         all_events: List[SplitEvent] = []
-        for idx, layer in enumerate(self.layers):
+        for idx, layer in enumerate(self.iter_moe_layers()):
             moe_mlp = layer.mlp
             if moe_mlp.last_router_output is None or moe_mlp.last_batch_energy is None:
                 continue
@@ -305,6 +315,14 @@ def upcycle_gemma_mlp_to_moe(dense_mlp: nn.Module, cfg: EMeansMoEConfig, layer_i
         block.router.ema_load[active_k0:].fill_(0.0)
 
     return block
+
+
+@overload
+def upcycle_gemma_model(dense_model: TinyGemmaForCausalLM, cfg: EMeansMoEConfig) -> TinyGemmaMoEForCausalLM: ...
+
+
+@overload
+def upcycle_gemma_model(dense_model: nn.Module, cfg: EMeansMoEConfig) -> nn.Module: ...
 
 
 def upcycle_gemma_model(dense_model: nn.Module, cfg: EMeansMoEConfig) -> nn.Module:

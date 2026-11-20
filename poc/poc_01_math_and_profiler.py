@@ -1,6 +1,27 @@
 """
-PoC 1 (Offline CPU, Zero Cost): Numerical Proof + Routing Simulation + Gemma Audit.
-Writes structured telemetry to `poc/results/poc_01_results.json`.
+PoC 1 (Offline CPU, $0 Cost): Numerical Invariance Proof + Routing Sim + Gemma Audit
+===================================================================================
+
+STANDALONE RUN INSTRUCTIONS (ANY MACHINE — WINDOWS / LINUX / MAC / COLAB):
+  - Hardware Needed : Any CPU (no GPU required, zero downloads).
+  - Dependencies    : Python >= 3.10 and `numpy` (`pip install numpy`).
+  - Steps:
+      1. Clone/copy `MoE-Dynamic-Expert-Splitting/` onto the target machine.
+      2. Open terminal inside `MoE-Dynamic-Expert-Splitting/` (or pass full script path).
+      3. Run:
+             python poc/poc_01_math_and_profiler.py
+      4. Compile the markdown summary (optional):
+             python poc/compile_poc_report.py
+
+WHAT TO EXPECT:
+  - Runtime         : ~1-3 seconds.
+  - Console Output  :
+      1. Softmax probability & MoE output difference <= 1e-15 across tau_r in {0.5, 1.0, 2.5}.
+      2. 400-step multi-domain synthetic routing table comparing unbalanced, aux_loss,
+         deepseek_bias, and emeans (dead experts, max/mean load, entropy, splits).
+  - Saved Artifacts :
+      * Telemetry JSON : `poc/results/poc_01_results.json`
+      * Run Log File   : `poc/logs/poc_01/run_<YYYYMMDD_HHMMSS>.log` (+ `latest.log`)
 """
 
 import json
@@ -15,6 +36,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from moe_splitting.config import GEMMA_PRESETS  # noqa: E402
 from moe_splitting.metrics import compute_routing_health  # noqa: E402
+from moe_splitting.poc_logging import tee_poc_logs  # noqa: E402
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -206,31 +228,32 @@ def profile_gemma_targets() -> list:
 
 
 def main():
-    out_dir = POC_DIR / "results"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    with tee_poc_logs("poc_01"):
+        out_dir = POC_DIR / "results"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    invariance = run_invariance_proof()
-    simulations = [run_synthetic_simulation(m) for m in ("unbalanced", "aux_loss", "deepseek_bias", "emeans")]
-    gemma_profiles = profile_gemma_targets()
+        invariance = run_invariance_proof()
+        simulations = [run_synthetic_simulation(m) for m in ("unbalanced", "aux_loss", "deepseek_bias", "emeans")]
+        gemma_profiles = profile_gemma_targets()
 
-    payload = {
-        "poc_id": "poc_01",
-        "title": "Offline Invariance Proof, Synthetic Routing Comparison & Gemma Architecture Audit",
-        "invariance_proof": invariance,
-        "synthetic_simulation": simulations,
-        "gemma_architecture_profiles": gemma_profiles,
-    }
-    out_path = out_dir / "poc_01_results.json"
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        payload = {
+            "poc_id": "poc_01",
+            "title": "Offline Invariance Proof, Synthetic Routing Comparison & Gemma Architecture Audit",
+            "invariance_proof": invariance,
+            "synthetic_simulation": simulations,
+            "gemma_architecture_profiles": gemma_profiles,
+        }
+        out_path = out_dir / "poc_01_results.json"
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    print("=== PoC 1 COMPLETE ===")
-    print(f"Max softmax invariance diff across all tau_r: {max(r['max_moe_output_diff'] for r in invariance):.3e}")
-    for row in simulations:
-        print(
-            f"  {row['mode']:<15} | splits={row['splits']:2d} | dead={row['dead_experts']:2d} | "
-            f"max/mean={row['max_to_mean']:.2f}x | entropy={row['norm_entropy']:.3f}"
-        )
-    print(f"Saved JSON telemetry -> {out_path}")
+        print("=== PoC 1 COMPLETE ===")
+        print(f"Max softmax invariance diff across all tau_r: {max(r['max_moe_output_diff'] for r in invariance):.3e}")
+        for row in simulations:
+            print(
+                f"  {row['mode']:<15} | splits={row['splits']:2d} | dead={row['dead_experts']:2d} | "
+                f"max/mean={row['max_to_mean']:.2f}x | entropy={row['norm_entropy']:.3f}"
+            )
+        print(f"Saved JSON telemetry -> {out_path}")
 
 
 if __name__ == "__main__":

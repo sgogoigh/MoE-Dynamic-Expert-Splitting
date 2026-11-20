@@ -18,6 +18,17 @@ This folder holds the **4-Tier Proof-of-Concept (PoC) suite** designed to verify
 
 ---
 
+## Automatic Run Logging (`poc/logs/`)
+
+Every PoC script automatically tees console output + system/GPU environment headers into structured subfolders via [`poc_logging.py`](../src/moe_splitting/poc_logging.py):
+- `poc/logs/poc_01/run_<YYYYMMDD_HHMMSS>.log` & `latest.log`
+- `poc/logs/poc_02/run_<YYYYMMDD_HHMMSS>[_dry_run].log` & `latest.log`
+- `poc/logs/poc_03/run_<YYYYMMDD_HHMMSS>[_dry_run].log` & `latest.log`
+- `poc/logs/poc_04/run_<YYYYMMDD_HHMMSS>[_dry_run].log` & `latest.log`
+- `poc/logs/compile_report/run_<YYYYMMDD_HHMMSS>.log` & `latest.log`
+
+---
+
 ## Step-by-Step Execution Workflow
 
 ### 1. Run Offline PoC 1 Immediately

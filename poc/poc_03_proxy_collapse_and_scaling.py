@@ -1,11 +1,35 @@
 """
-PoC 3 (1x RTX 4090 or 1x A100 — 6-12 GPU-hours):
-  Part A: 4-way comparison on imbalanced multi-domain token shards (or local synthetic stream)
-          with a ~50M-active / ~180M-total GeGLU MoE.
-  Part B: Mini 2x2x3 scaling-law grid over (E, K_r, alpha_min) feeding `fit_alpha_min_powerlaw`.
+PoC 3 (1x RTX 4090 / 1x A100 — 6-12 GPU-Hours): Multi-Domain Proxy & Mini Scaling Law
+=======================================================================================
 
-Requires explicit `--run-all` flag to begin GPU execution (safe `--dry-run` by default).
-Writes telemetry to `poc/results/poc_03_results.json`.
+STANDALONE RUN INSTRUCTIONS (ANY SINGLE-GPU LINUX / WINDOWS / CLOUD MACHINE):
+  - Hardware Needed : 1x GPU with >= 24 GB VRAM (`RTX 4090`, `A10G`, `A100`, `L40S`).
+  - Dependencies    : Python >= 3.10, `numpy`, `torch` (`pip install numpy torch`).
+  - Steps:
+      1. Copy/clone `MoE-Dynamic-Expert-Splitting/` onto the GPU machine and `cd` into it.
+      2. Install dependencies:
+             pip install -r requirements.txt
+      3. Inspect grid size & memory budget without starting training (dry-run):
+             python poc/poc_03_proxy_collapse_and_scaling.py --dry-run
+      4. (Optional) Prepare tokenized uint16/uint32 `.npy` shards in a directory
+         named `prose.npy`, `code.npy`, `math.npy` (60/25/15 domain mix). If `--data-dir`
+         is omitted, the script uses its built-in 3-domain synthetic token generator.
+      5. Launch the full Part A + Part B benchmark (requires explicit `--run-all`):
+             python poc/poc_03_proxy_collapse_and_scaling.py --run-all --steps 1500 --sweep-steps 400
+         (Or pass `--data-dir /path/to/shards` to run on real tokenized text/code/math.)
+      6. Compile results into markdown:
+             python poc/compile_poc_report.py
+
+WHAT TO EXPECT:
+  - Part A trains 4 matched-FLOP ~180M-total GeGLU MoEs (`unbalanced`, `aux_loss`,
+    `deepseek_bias`, `emeans`) and prints validation loss, perplexity, dead experts,
+    max-to-mean load ratio, and normalized entropy.
+  - Part B runs a 12-point (E, K_r, alpha_min) mini grid and prints the fitted OLS
+    log-power-law coefficients + Leave-One-Scale-Out (LOSO) relative error %.
+  - Runtime         : ~20-40 min (synthetic fast sweep) up to ~6-12 hrs (long shards).
+  - Saved Artifacts :
+      * Telemetry JSON : `poc/results/poc_03_results.json`
+      * Run Log File   : `poc/logs/poc_03/run_<YYYYMMDD_HHMMSS>[_dry_run].log` (+ `latest.log`)
 """
 
 import argparse
@@ -21,6 +45,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from moe_splitting.config import EMeansMoEConfig, GemmaArchitectureSpec  # noqa: E402
 from moe_splitting.metrics import compute_routing_health  # noqa: E402
+from moe_splitting.poc_logging import tee_poc_logs  # noqa: E402
 from moe_splitting.scaling_law import ScalingObservation, evaluate_loso, fit_alpha_min_powerlaw  # noqa: E402
 
 
@@ -95,8 +120,10 @@ def train_proxy_run(spec: GemmaArchitectureSpec, cfg: EMeansMoEConfig, steps: in
     from moe_splitting import TinyGemmaForCausalLM, upcycle_gemma_model
 
     torch.manual_seed(42)
-    dense = TinyGemmaForCausalLM(spec).to(device)
-    model = upcycle_gemma_model(dense, cfg).to(device)
+    dense = TinyGemmaForCausalLM(spec)
+    dense.to(device)
+    model = upcycle_gemma_model(dense, cfg)
+    model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
 
     for step in range(1, steps + 1):
@@ -121,7 +148,7 @@ def train_proxy_run(spec: GemmaArchitectureSpec, cfg: EMeansMoEConfig, steps: in
 
     mean_val = sum(val_losses) / len(val_losses)
     dead_l, mm_l, ent_l = [], [], []
-    for layer in model.layers:
+    for layer in model.iter_moe_layers():
         h = compute_routing_health(layer.mlp.router.ema_load, top_k=cfg.top_k, dead_tau=cfg.split_tau)
         dead_l.append(h["dead_count"])
         mm_l.append(h["max_to_mean"])
@@ -139,87 +166,94 @@ def train_proxy_run(spec: GemmaArchitectureSpec, cfg: EMeansMoEConfig, steps: in
 
 def main():
     args = parse_args()
-    spec = build_proxy_spec()
-    mini_grid = list(itertools.product([8, 16], [1, 2], [0.002, 0.01, 0.05]))
+    is_dry = args.dry_run or not args.run_all
+    tag = "dry_run" if is_dry else f"run_s{args.steps}"
+    with tee_poc_logs("poc_03", run_tag=tag):
+        spec = build_proxy_spec()
+        mini_grid = list(itertools.product([8, 16], [1, 2], [0.002, 0.01, 0.05]))
 
-    if args.dry_run or not args.run_all:
-        print("=== PoC 3 DRY-RUN PLAN ===")
-        print(f"Proxy Model: {spec.name} (d={spec.hidden_size}, ff={spec.intermediate_size}, L={spec.num_hidden_layers})")
-        print(f"Part A: 4 comparators (unbalanced, aux_loss, deepseek_bias, emeans) @ {args.steps} steps each")
-        print(f"Part B: {len(mini_grid)} mini scaling-law grid points over (E, K_r, alpha_min) @ {args.sweep_steps} steps")
-        print("Re-run with `--run-all` on a GPU node to execute training.")
-        return
+        if is_dry:
+            print("=== PoC 3 DRY-RUN PLAN ===")
+            print(f"Proxy Model: {spec.name} (d={spec.hidden_size}, ff={spec.intermediate_size}, L={spec.num_hidden_layers})")
+            print(f"Part A: 4 comparators (unbalanced, aux_loss, deepseek_bias, emeans) @ {args.steps} steps each")
+            print(f"Part B: {len(mini_grid)} mini scaling-law grid points over (E, K_r, alpha_min) @ {args.sweep_steps} steps")
+            print("Re-run with `--run-all` on a GPU node to execute training.")
+            return
 
-    import torch
+        import torch
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    domain_results = []
-    for mode in ("unbalanced", "aux_loss", "deepseek_bias", "emeans"):
-        cfg = EMeansMoEConfig(
-            num_experts=16,
-            top_k=2,
-            router_mode=mode,
-            alpha_0=0.08,
-            alpha_min=0.01,
-            split_interval=100,
-            cooldown_steps=200,
-            upcycle_strategy="sliced_granular",
-        )
-        domain_results.append(train_proxy_run(spec, cfg, args.steps, args, device))
-
-    # Mini scaling-law sweep picking winning alpha_min per (BL, E, K_r)
-    obs = []
-    bl_val = float(args.batch_size * args.seq_len)
-    for e_cnt, k_r in itertools.product([8, 16], [1, 2]):
-        best_a, best_score = 0.01, float("inf")
-        for a_min in (0.002, 0.01, 0.05):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Executing PoC 3 on device={device}...")
+        domain_results = []
+        for mode in ("unbalanced", "aux_loss", "deepseek_bias", "emeans"):
             cfg = EMeansMoEConfig(
-                num_experts=e_cnt,
-                top_k=k_r,
-                router_mode="emeans",
-                alpha_0=max(0.05, a_min * 4),
-                alpha_min=a_min,
-                split_interval=50,
-                cooldown_steps=100,
+                num_experts=16,
+                top_k=2,
+                router_mode=mode,
+                alpha_0=0.08,
+                alpha_min=0.01,
+                split_interval=100,
+                cooldown_steps=200,
                 upcycle_strategy="sliced_granular",
             )
-            r = train_proxy_run(spec, cfg, args.sweep_steps, args, device)
-            score = r["val_loss"] + 0.05 * (r["max_to_mean"] - 1.0)
-            if score < best_score:
-                best_score = score
-                best_a = a_min
-        obs.append(ScalingObservation(bl_val, float(e_cnt), float(k_r), 1.0, float(best_a)))
+            res = train_proxy_run(spec, cfg, args.steps, args, device)
+            domain_results.append(res)
+            print(f"  [Part A] {mode:<15} | val_loss={res['val_loss']} | ppl={res['val_ppl']} | dead={res['dead_experts']}")
 
-    # Add second batch-size slice so OLS design matrix is full rank
-    for e_cnt in (8, 16):
-        obs.append(ScalingObservation(bl_val * 2.0, float(e_cnt), 2.0, 1.0, 0.015))
+        # Mini scaling-law sweep picking winning alpha_min per (BL, E, K_r)
+        obs = []
+        bl_val = float(args.batch_size * args.seq_len)
+        for e_cnt, k_r in itertools.product([8, 16], [1, 2]):
+            best_a, best_score = 0.01, float("inf")
+            for a_min in (0.002, 0.01, 0.05):
+                cfg = EMeansMoEConfig(
+                    num_experts=e_cnt,
+                    top_k=k_r,
+                    router_mode="emeans",
+                    alpha_0=max(0.05, a_min * 4),
+                    alpha_min=a_min,
+                    split_interval=50,
+                    cooldown_steps=100,
+                    upcycle_strategy="sliced_granular",
+                )
+                r = train_proxy_run(spec, cfg, args.sweep_steps, args, device)
+                score = r["val_loss"] + 0.05 * (r["max_to_mean"] - 1.0)
+                if score < best_score:
+                    best_score = score
+                    best_a = a_min
+            obs.append(ScalingObservation(bl_val, float(e_cnt), float(k_r), 1.0, float(best_a)))
 
-    fit = fit_alpha_min_powerlaw(obs)
-    loso = evaluate_loso(obs)
+        # Add second batch-size slice so OLS design matrix is full rank
+        for e_cnt in (8, 16):
+            obs.append(ScalingObservation(bl_val * 2.0, float(e_cnt), 2.0, 1.0, 0.015))
 
-    out_dir = POC_DIR / "results"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "poc_03_results.json"
-    out_path.write_text(
-        json.dumps(
-            {
-                "poc_id": "poc_03",
-                "domain_comparison": domain_results,
-                "scaling_law_fit": {
-                    "c_alpha": fit.c_alpha,
-                    "a_bl": fit.a_bl,
-                    "a_e": fit.a_e,
-                    "a_k": fit.a_k,
-                    "a_tau": fit.a_tau,
-                    "r2_log": fit.r2_log,
-                    "loso_mean_rel_err_pct": round(loso["loso_mean_rel_err"] * 100.0, 2),
+        fit = fit_alpha_min_powerlaw(obs)
+        loso = evaluate_loso(obs)
+        print(f"  [Part B] Fitted Power Law: R^2={fit.r2_log:.4f} | LOSO rel_err={loso['loso_mean_rel_err']*100:.2f}%")
+
+        out_dir = POC_DIR / "results"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "poc_03_results.json"
+        out_path.write_text(
+            json.dumps(
+                {
+                    "poc_id": "poc_03",
+                    "domain_comparison": domain_results,
+                    "scaling_law_fit": {
+                        "c_alpha": fit.c_alpha,
+                        "a_bl": fit.a_bl,
+                        "a_e": fit.a_e,
+                        "a_k": fit.a_k,
+                        "a_tau": fit.a_tau,
+                        "r2_log": fit.r2_log,
+                        "loso_mean_rel_err_pct": round(loso["loso_mean_rel_err"] * 100.0, 2),
+                    },
                 },
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    print(f"Saved PoC 3 telemetry -> {out_path}")
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Saved PoC 3 telemetry -> {out_path}")
 
 
 if __name__ == "__main__":

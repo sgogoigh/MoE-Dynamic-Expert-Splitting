@@ -1,19 +1,30 @@
 """MoE Dynamic Expert Splitting — Auxiliary-loss-free load balancing via e-means primitives."""
 
 from .config import EMeansMoEConfig, GEMMA_PRESETS, GemmaArchitectureSpec
-from .metrics import compute_routing_health
-from .scaling_law import PowerLawFit, ScalingObservation, evaluate_loso, fit_alpha_min_powerlaw
+from .poc_logging import tee_poc_logs
 
 __all__ = [
     "EMeansMoEConfig",
     "GemmaArchitectureSpec",
     "GEMMA_PRESETS",
-    "compute_routing_health",
-    "PowerLawFit",
-    "ScalingObservation",
-    "fit_alpha_min_powerlaw",
-    "evaluate_loso",
+    "tee_poc_logs",
 ]
+
+try:
+    import numpy  # noqa: F401
+    from .metrics import compute_routing_health
+    from .scaling_law import PowerLawFit, ScalingObservation, evaluate_loso, fit_alpha_min_powerlaw
+
+    __all__ += [
+        "compute_routing_health",
+        "PowerLawFit",
+        "ScalingObservation",
+        "fit_alpha_min_powerlaw",
+        "evaluate_loso",
+    ]
+except ImportError:
+    # Allows stdlib-only scripts (like compile_poc_report.py) to import config/poc_logging cleanly
+    pass
 
 try:
     import torch  # noqa: F401

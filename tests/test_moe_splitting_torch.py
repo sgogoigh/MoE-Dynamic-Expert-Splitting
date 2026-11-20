@@ -59,7 +59,7 @@ def test_dynamic_split_revives_dead_expert_and_preserves_ema_sum():
     loss.backward()
     opt.step()
 
-    router0 = moe.layers[0].mlp.router
+    router0 = moe.iter_moe_layers()[0].mlp.router
     sum_before = router0.ema_load.sum().item()
     bias_donor_before = router0.gate.bias[0].item()
 

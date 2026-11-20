@@ -1,13 +1,32 @@
 """
-PoC 2 (1 Free Colab T4 / 1x GPU or CPU dry-run): Split-Step Continuity & Loss-Spike Ablation.
-Compares:
-  1. unbalanced         (baseline collapse)
-  2. aux_loss           (Switch aux loss)
-  3. deepseek_bias      (bias adjustment only)
-  4. emeans_no_shift    (ablation WITHOUT -tau_r ln(2) -> proves spike without bias shift)
-  5. emeans             (full method WITH -tau_r ln(2) -> smooth continuity + 0 dead experts)
+PoC 2 (1 Free Colab T4 / 1x GPU or CPU Dry-Run): Split-Step Continuity & Loss-Spike Ablation
+=============================================================================================
 
-Outputs structured metrics to `poc/results/poc_02_results.json`.
+STANDALONE RUN INSTRUCTIONS (FRESH GPU MACHINE / COLAB / RUNPOD):
+  - Hardware Needed : 1x GPU with >= 2 GB VRAM (runs on Colab T4, or CPU for tiny runs).
+  - Dependencies    : Python >= 3.10, `numpy`, `torch` (`pip install numpy torch`).
+  - Steps:
+      1. Copy/clone `MoE-Dynamic-Expert-Splitting/` and `cd` into its root folder.
+      2. Install minimal deps if missing:
+             pip install -r requirements.txt  (or `pip install numpy torch`)
+      3. Verify setup cleanly with a dry-run (zero training):
+             python poc/poc_02_tiny_gemma_continuity.py --dry-run
+      4. Execute the 5-condition PyTorch ablation benchmark:
+             python poc/poc_02_tiny_gemma_continuity.py --steps 1000 --d-model 256 --layers 6
+         (For a 3-minute smoke run on slow GPU/CPU, use `--steps 300 --d-model 128 --layers 4`.)
+      5. Refresh the compiled markdown report:
+             python poc/compile_poc_report.py
+
+WHAT TO EXPECT:
+  - Compares 5 modes: `unbalanced`, `aux_loss`, `deepseek_bias`, `emeans_no_shift`
+    (ablation WITHOUT `-tau_r ln 2`), and `emeans` (full method WITH `-tau_r ln 2`).
+  - Runtime         : ~5-15 minutes on Colab T4 at `--steps 1000` (depends on `--d-model`).
+  - Console Output  : Per-condition summary showing `splits`, `max_split_deltaL` (near zero
+                      for `emeans` vs larger jump for `emeans_no_shift`), `final_loss`,
+                      and `dead` expert count dropping toward 0.
+  - Saved Artifacts :
+      * Telemetry JSON : `poc/results/poc_02_results.json`
+      * Run Log File   : `poc/logs/poc_02/run_<YYYYMMDD_HHMMSS>[_dry_run].log` (+ `latest.log`)
 """
 
 import argparse
@@ -22,6 +41,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from moe_splitting.config import EMeansMoEConfig, GemmaArchitectureSpec  # noqa: E402
 from moe_splitting.metrics import compute_routing_health  # noqa: E402
+from moe_splitting.poc_logging import tee_poc_logs  # noqa: E402
 
 
 def parse_args():
@@ -72,7 +92,8 @@ def run_single_condition(label: str, args, spec: GemmaArchitectureSpec, device: 
     from moe_splitting.splitting import DynamicExpertSplitter
 
     torch.manual_seed(args.seed)
-    dense = TinyGemmaForCausalLM(spec).to(device)
+    dense = TinyGemmaForCausalLM(spec)
+    dense.to(device)
 
     mode = "emeans" if label == "emeans_no_shift" else label
     moe_cfg = EMeansMoEConfig(
@@ -92,7 +113,8 @@ def run_single_condition(label: str, args, spec: GemmaArchitectureSpec, device: 
         dormant_init_bias=-6.0,
     )
 
-    model = upcycle_gemma_model(dense, moe_cfg).to(device)
+    model = upcycle_gemma_model(dense, moe_cfg)
+    model.to(device)
     if label == "emeans_no_shift":
         # Ablation subclass that omits the -tau_r ln(2) bias shift during splitting
         class NoBiasShiftSplitter(DynamicExpertSplitter):
@@ -104,7 +126,7 @@ def run_single_condition(label: str, args, spec: GemmaArchitectureSpec, device: 
                     router.gate.bias[donor_idx] = saved_bias
                     router.gate.bias[dead_idx] = saved_bias
 
-        model.splitter = NoBiasShiftSplitter()
+        model.set_splitter(NoBiasShiftSplitter())
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     split_deltas = []
@@ -132,7 +154,7 @@ def run_single_condition(label: str, args, spec: GemmaArchitectureSpec, device: 
     dead_counts = []
     max_means = []
     entropies = []
-    for layer in model.layers:
+    for layer in model.iter_moe_layers():
         h = compute_routing_health(layer.mlp.router.ema_load, top_k=args.top_k, dead_tau=moe_cfg.split_tau)
         dead_counts.append(h["dead_count"])
         max_means.append(h["max_to_mean"])
@@ -152,55 +174,57 @@ def run_single_condition(label: str, args, spec: GemmaArchitectureSpec, device: 
 
 def main():
     args = parse_args()
-    spec = GemmaArchitectureSpec(
-        name="poc2-tiny-gemma",
-        hidden_size=args.d_model,
-        intermediate_size=args.ff_dim,
-        num_hidden_layers=args.layers,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=args.d_model // 4,
-        vocab_size=1024,
-    )
-
-    if args.dry_run:
-        print("=== PoC 2 DRY-RUN PLAN ===")
-        print(f"TinyGemma: d={spec.hidden_size}, ff={spec.intermediate_size}, L={spec.num_hidden_layers}, E={args.num_experts}, K_r={args.top_k}")
-        print(f"Conditions: unbalanced, aux_loss, deepseek_bias, emeans_no_shift, emeans ({args.steps} steps each)")
-        return
-
-    try:
-        import torch
-    except ImportError:
-        print("PyTorch is not installed in this local environment. Re-run with `--dry-run` or install PyTorch on a GPU.")
-        sys.exit(1)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Running PoC 2 on device={device} ({args.steps} steps/condition)...")
-    runs = []
-    for label in ("unbalanced", "aux_loss", "deepseek_bias", "emeans_no_shift", "emeans"):
-        r = run_single_condition(label, args, spec, device)
-        runs.append(r)
-        print(
-            f"  {label:<16} | splits={r['num_splits']:2d} | max_split_deltaL={r['max_abs_split_delta_loss']} | "
-            f"loss={r['final_loss']:.4f} | dead={r['final_dead_experts']} | max/mean={r['final_max_to_mean']}x"
+    tag = "dry_run" if args.dry_run else f"s{args.steps}_d{args.d_model}"
+    with tee_poc_logs("poc_02", run_tag=tag):
+        spec = GemmaArchitectureSpec(
+            name="poc2-tiny-gemma",
+            hidden_size=args.d_model,
+            intermediate_size=args.ff_dim,
+            num_hidden_layers=args.layers,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=args.d_model // 4,
+            vocab_size=1024,
         )
 
-    out_dir = POC_DIR / "results"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "poc_02_results.json"
-    out_path.write_text(
-        json.dumps(
-            {
-                "poc_id": "poc_02",
-                "config": vars(args),
-                "runs": runs,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    print(f"Saved PoC 2 telemetry -> {out_path}")
+        if args.dry_run:
+            print("=== PoC 2 DRY-RUN PLAN ===")
+            print(f"TinyGemma: d={spec.hidden_size}, ff={spec.intermediate_size}, L={spec.num_hidden_layers}, E={args.num_experts}, K_r={args.top_k}")
+            print(f"Conditions: unbalanced, aux_loss, deepseek_bias, emeans_no_shift, emeans ({args.steps} steps each)")
+            return
+
+        try:
+            import torch
+        except ImportError:
+            print("PyTorch is not installed in this local environment. Re-run with `--dry-run` or install PyTorch on a GPU.")
+            sys.exit(1)
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Running PoC 2 on device={device} ({args.steps} steps/condition)...")
+        runs = []
+        for label in ("unbalanced", "aux_loss", "deepseek_bias", "emeans_no_shift", "emeans"):
+            r = run_single_condition(label, args, spec, device)
+            runs.append(r)
+            print(
+                f"  {label:<16} | splits={r['num_splits']:2d} | max_split_deltaL={r['max_abs_split_delta_loss']} | "
+                f"loss={r['final_loss']:.4f} | dead={r['final_dead_experts']} | max/mean={r['final_max_to_mean']}x"
+            )
+
+        out_dir = POC_DIR / "results"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "poc_02_results.json"
+        out_path.write_text(
+            json.dumps(
+                {
+                    "poc_id": "poc_02",
+                    "config": vars(args),
+                    "runs": runs,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Saved PoC 2 telemetry -> {out_path}")
 
 
 if __name__ == "__main__":
