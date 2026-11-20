@@ -236,23 +236,44 @@ def main():
         simulations = [run_synthetic_simulation(m) for m in ("unbalanced", "aux_loss", "deepseek_bias", "emeans")]
         gemma_profiles = profile_gemma_targets()
 
+        sim_by_mode = {r["mode"]: r for r in simulations}
+        max_inv_diff = max(r["max_moe_output_diff"] for r in invariance)
+        diagnostics = {
+            "softmax_invariance_lt_1e12": max_inv_diff < 1e-12,
+            "unbalanced_baseline_collapses": (
+                sim_by_mode["unbalanced"]["dead_experts"] >= 8
+                and sim_by_mode["unbalanced"]["max_to_mean"] > 4.0
+            ),
+            "emeans_revives_dead_vs_unbalanced": (
+                sim_by_mode["emeans"]["splits"] > 0
+                and sim_by_mode["emeans"]["dead_experts"] < sim_by_mode["unbalanced"]["dead_experts"]
+            ),
+            "emeans_improves_entropy_vs_unbalanced": (
+                sim_by_mode["emeans"]["norm_entropy"] > sim_by_mode["unbalanced"]["norm_entropy"]
+            ),
+            "gemma_ema_sync_under_25kb": all(g["ema_sync_KB_per_step"] <= 25.0 for g in gemma_profiles),
+        }
+        diagnostics["all_passed"] = all(diagnostics.values())
+
         payload = {
             "poc_id": "poc_01",
             "title": "Offline Invariance Proof, Synthetic Routing Comparison & Gemma Architecture Audit",
             "invariance_proof": invariance,
             "synthetic_simulation": simulations,
             "gemma_architecture_profiles": gemma_profiles,
+            "diagnostics": diagnostics,
         }
         out_path = out_dir / "poc_01_results.json"
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         print("=== PoC 1 COMPLETE ===")
-        print(f"Max softmax invariance diff across all tau_r: {max(r['max_moe_output_diff'] for r in invariance):.3e}")
+        print(f"Max softmax invariance diff across all tau_r: {max_inv_diff:.3e}")
         for row in simulations:
             print(
                 f"  {row['mode']:<15} | splits={row['splits']:2d} | dead={row['dead_experts']:2d} | "
                 f"max/mean={row['max_to_mean']:.2f}x | entropy={row['norm_entropy']:.3f}"
             )
+        print(f"Baseline Diagnostics Passed: {diagnostics['all_passed']} -> {diagnostics}")
         print(f"Saved JSON telemetry -> {out_path}")
 
 

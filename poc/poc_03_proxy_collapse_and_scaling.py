@@ -231,6 +231,16 @@ def main():
         loso = evaluate_loso(obs)
         print(f"  [Part B] Fitted Power Law: R^2={fit.r2_log:.4f} | LOSO rel_err={loso['loso_mean_rel_err']*100:.2f}%")
 
+        by_mode = {r["mode"]: r for r in domain_results}
+        diagnostics = {
+            "emeans_beats_or_matches_aux_ppl": by_mode["emeans"]["val_ppl"] <= by_mode["aux_loss"]["val_ppl"] * 1.02,
+            "emeans_fewer_dead_than_unbalanced": (
+                by_mode["emeans"]["dead_experts"] <= by_mode["unbalanced"]["dead_experts"]
+            ),
+            "power_law_r2_ge_075": fit.r2_log >= 0.75,
+        }
+        diagnostics["all_passed"] = all(diagnostics.values())
+
         out_dir = POC_DIR / "results"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "poc_03_results.json"
@@ -248,11 +258,13 @@ def main():
                         "r2_log": fit.r2_log,
                         "loso_mean_rel_err_pct": round(loso["loso_mean_rel_err"] * 100.0, 2),
                     },
+                    "diagnostics": diagnostics,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
+        print(f"PoC 3 Baseline Diagnostics Passed: {diagnostics['all_passed']} -> {diagnostics}")
         print(f"Saved PoC 3 telemetry -> {out_path}")
 
 

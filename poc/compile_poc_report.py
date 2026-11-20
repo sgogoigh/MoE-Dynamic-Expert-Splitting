@@ -31,6 +31,15 @@ sys.path.insert(0, str(ROOT / "src"))
 from moe_splitting.poc_logging import tee_poc_logs  # noqa: E402
 
 
+def _format_diag_line(obj) -> str:
+    d = obj.get("diagnostics") if isinstance(obj, dict) else None
+    if not d:
+        return ""
+    status = "PASS" if d.get("all_passed") else "CHECK"
+    details = ", ".join(f"{k}={v}" for k, v in d.items() if k != "all_passed")
+    return f"- **Baseline Diagnostics (`{status}`)**: {details}"
+
+
 def _load_json(name: str):
     p = RESULTS_DIR / name
     if p.exists():
@@ -95,6 +104,9 @@ def main():
                     f"| `{g['preset']}` | `{g['E']}/{g['top_k']}` | `{g['strategy']}` | {g['dense_params_M']} | "
                     f"{g['moe_total_params_M']} | {g['moe_active_params_M']} | {g['unsharded_train_GB']} | {g['ema_sync_KB_per_step']} |"
                 )
+            d1 = _format_diag_line(p1)
+            if d1:
+                lines += ["", d1]
             lines.append("")
 
         if p2:
@@ -115,6 +127,9 @@ def main():
                     f"| `{row['label']}` | {row['num_splits']} | {spike} | {row['final_loss']:.4f} | "
                     f"{row['final_dead_experts']} | {row['final_max_to_mean']:.2f}x |"
                 )
+            d2 = _format_diag_line(p2)
+            if d2:
+                lines += ["", d2]
             lines.append("")
         else:
             lines += [
@@ -147,6 +162,9 @@ def main():
                     f"($R^2 = {sf['r2_log']:.4f}$, LOSO rel err = `{sf.get('loso_mean_rel_err_pct', 'N/A')}%`)",
                     "",
                 ]
+            d3 = _format_diag_line(p3)
+            if d3:
+                lines += [d3, ""]
         else:
             lines += [
                 "---",
@@ -169,6 +187,9 @@ def main():
                 f"- **Validation Loss Before -> After**: `{p4['val_loss_start']:.4f}` -> `{p4['val_loss_end']:.4f}`",
                 "",
             ]
+            d4 = _format_diag_line(p4)
+            if d4:
+                lines += [d4, ""]
         else:
             lines += [
                 "---",

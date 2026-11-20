@@ -70,6 +70,12 @@ python poc/compile_poc_report.py
 ```
 Then pair `poc/results/COMPILED-POC-REPORT.md` with [`PROPOSAL-TEMPLATE.md`](./PROPOSAL-TEMPLATE.md).
 
+### 6. Run Full Diagnostics, Syntax, Baseline & Domain Verification
+```bash
+python scripts/run_all_diagnostics.py
+```
+Checks syntax/bytecode across all `.py` files, config JSON/SVG/Markdown integrity, negative invariance ablations, multi-seed PoC 1 baseline dominance, and PyTorch tests when installed (`poc/results/diagnostic_suite_results.json` & `poc/logs/diagnostics/latest.log`).
+
 ---
 
 ## Related Docs

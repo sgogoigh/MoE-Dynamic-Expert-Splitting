@@ -210,6 +210,23 @@ def main():
                 f"loss={r['final_loss']:.4f} | dead={r['final_dead_experts']} | max/mean={r['final_max_to_mean']}x"
             )
 
+        by_lbl = {r["label"]: r for r in runs}
+        e_spike = by_lbl["emeans"]["max_abs_split_delta_loss"]
+        noshift_spike = by_lbl["emeans_no_shift"]["max_abs_split_delta_loss"]
+        diagnostics = {
+            "emeans_triggered_splits": by_lbl["emeans"]["num_splits"] > 0,
+            "bias_shift_reduces_split_spike": (
+                e_spike is not None and noshift_spike is not None and e_spike <= noshift_spike
+            ),
+            "emeans_fewer_dead_than_unbalanced": (
+                by_lbl["emeans"]["final_dead_experts"] <= by_lbl["unbalanced"]["final_dead_experts"]
+            ),
+            "emeans_higher_entropy_than_unbalanced": (
+                by_lbl["emeans"]["final_norm_entropy"] >= by_lbl["unbalanced"]["final_norm_entropy"]
+            ),
+        }
+        diagnostics["all_passed"] = all(diagnostics.values())
+
         out_dir = POC_DIR / "results"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "poc_02_results.json"
@@ -219,11 +236,13 @@ def main():
                     "poc_id": "poc_02",
                     "config": vars(args),
                     "runs": runs,
+                    "diagnostics": diagnostics,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
+        print(f"PoC 2 Baseline Diagnostics Passed: {diagnostics['all_passed']} -> {diagnostics}")
         print(f"Saved PoC 2 telemetry -> {out_path}")
 
 

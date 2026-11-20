@@ -115,5 +115,13 @@
       "unsharded_train_GB": 1584.89,
       "ema_sync_KB_per_step": 21.0
     }
-  ]
+  ],
+  "diagnostics": {
+    "softmax_invariance_lt_1e12": true,
+    "unbalanced_baseline_collapses": true,
+    "emeans_revives_dead_vs_unbalanced": true,
+    "emeans_improves_entropy_vs_unbalanced": true,
+    "gemma_ema_sync_under_25kb": true,
+    "all_passed": true
+  }
 }

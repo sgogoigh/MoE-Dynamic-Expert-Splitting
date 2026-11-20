@@ -27,4 +27,4 @@ dev = [
 where = ["src"]
 
 [tool.pyright]
-extraPaths = ["src"]
+extraPaths = ["src", "."]

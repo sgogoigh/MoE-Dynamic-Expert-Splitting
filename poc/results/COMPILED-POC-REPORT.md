@@ -1,6 +1,6 @@
 # Compiled Proof-of-Concept Evidence Report
 
-**Generated**: 2026-11-21 01:43:12  
+**Generated**: 2026-11-21 04:15:15  
 **Completed Tiers**: PoC 1
 
 ---
@@ -30,6 +30,8 @@
 | `gemma-2-2b` | `16/2` | `sliced_granular` | 2614.34 | 14208.88 | 2615.3 | 211.73 | 3.25 |
 | `gemma-2-2b` | `32/2` | `sliced_granular` | 2614.34 | 27459.65 | 2616.26 | 409.18 | 6.5 |
 | `gemma-2-9b` | `64/4` | `sliced_granular` | 9241.71 | 106359.97 | 9251.34 | 1584.89 | 21.0 |
+
+- **Baseline Diagnostics (`PASS`)**: softmax_invariance_lt_1e12=True, unbalanced_baseline_collapses=True, emeans_revives_dead_vs_unbalanced=True, emeans_improves_entropy_vs_unbalanced=True, gemma_ema_sync_under_25kb=True
 
 ---
 

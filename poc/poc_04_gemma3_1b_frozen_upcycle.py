@@ -179,6 +179,15 @@ def main():
             for _, blk in moe_blocks
         ) / max(len(moe_blocks), 1)
 
+        init_dormant = args.num_experts - args.active_k0
+        diagnostics = {
+            "backbone_partially_frozen": trainable_params < total_params,
+            "triggered_progressive_splits": total_splits > 0,
+            "reduced_dormant_experts": final_dead < init_dormant,
+            "training_loss_decreased": val_start is not None and val_end is not None and val_end < val_start,
+        }
+        diagnostics["all_passed"] = all(diagnostics.values())
+
         out_dir = POC_DIR / "results"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "poc_04_results.json"
@@ -189,16 +198,18 @@ def main():
                     "model_id": model_id,
                     "upcycle_last_n": args.upcycle_last_n,
                     "trainable_params_M": round(trainable_params / 1e6, 2),
-                    "initial_dormant_experts": args.num_experts - args.active_k0,
+                    "initial_dormant_experts": init_dormant,
                     "total_splits": total_splits,
                     "final_dead_experts": round(final_dead, 2),
                     "val_loss_start": val_start,
                     "val_loss_end": val_end,
+                    "diagnostics": diagnostics,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
+        print(f"PoC 4 Baseline Diagnostics Passed: {diagnostics['all_passed']} -> {diagnostics}")
         print(f"Saved PoC 4 telemetry -> {out_path}")
 
 
