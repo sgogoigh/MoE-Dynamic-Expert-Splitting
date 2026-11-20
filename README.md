@@ -1,4 +1,5 @@
 # MoE-Dynamic-Expert-Splitting
+Research - Eliminating Routing Collapse in Sparse MoEs without Auxiliary Losses (e_means vs k_means)
 
 **Eliminating Routing Collapse in Sparse MoEs without Auxiliary Losses** — translating `e-means` sufficient statistics $(N_j, S_j)$, non-stationary cosine EMA floors ($\alpha_{\min}$), and function-preserving donor splitting ($b \leftarrow b - \tau_r \ln 2$) into **GeGLU Sparse MoE** architectures upcycled from **Gemma 2 / Gemma 3**.
 
