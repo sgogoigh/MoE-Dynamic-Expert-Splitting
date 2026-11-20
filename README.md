@@ -17,6 +17,7 @@ Research - Eliminating Routing Collapse in Sparse MoEs without Auxiliary Losses 
 | **`src/moe_splitting/`** | Core modules: `config.py`, `router.py`, `experts.py`, `splitting.py`, `gemma_upcycle.py`, `metrics.py`, `scaling_law.py` |
 | **`scripts/`** | Offline profiler (`explore_gemma_architecture.py`), NumPy verification mini-run (`mini_run_math_verify.py`), PyTorch TinyGemma upcycling dry-run (`mini_run_gemma_upcycle_torch.py`), and sweep planner (`plan_scaling_sweep.py`) |
 | **`configs/`** | Ready JSON specs for `tiny-gemma-debug`, `gemma-3-1b`, and `gemma-2-2b` |
+| [**`poc/`**](./poc/README.md) | 4-Tier Proof-of-Concept suite + result compiler & grant proposal template (`poc_01`..`poc_04` + `compile_poc_report.py`) |
 | **`tests/`** | Automated math & PyTorch verification tests |
 
 ---

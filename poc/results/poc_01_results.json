@@ -1,0 +1,119 @@
+{
+  "poc_id": "poc_01",
+  "title": "Offline Invariance Proof, Synthetic Routing Comparison & Gemma Architecture Audit",
+  "invariance_proof": [
+    {
+      "tau_r": 0.5,
+      "max_pair_prob_diff": 2.220446049250313e-16,
+      "max_other_prob_diff": 2.7755575615628914e-17,
+      "max_moe_output_diff": 8.881784197001252e-16
+    },
+    {
+      "tau_r": 1.0,
+      "max_pair_prob_diff": 3.3306690738754696e-16,
+      "max_other_prob_diff": 1.1102230246251565e-16,
+      "max_moe_output_diff": 8.881784197001252e-16
+    },
+    {
+      "tau_r": 2.5,
+      "max_pair_prob_diff": 5.551115123125783e-17,
+      "max_other_prob_diff": 5.551115123125783e-17,
+      "max_moe_output_diff": 2.220446049250313e-16
+    }
+  ],
+  "synthetic_simulation": [
+    {
+      "mode": "unbalanced",
+      "splits": 0,
+      "dead_experts": 10,
+      "max_to_mean": 6.0641,
+      "norm_entropy": 0.56,
+      "gini": 0.7669,
+      "proxy_loss_last50": 14.035
+    },
+    {
+      "mode": "aux_loss",
+      "splits": 0,
+      "dead_experts": 2,
+      "max_to_mean": 2.4105,
+      "norm_entropy": 0.895,
+      "gini": 0.4111,
+      "proxy_loss_last50": 8.8366
+    },
+    {
+      "mode": "deepseek_bias",
+      "splits": 0,
+      "dead_experts": 1,
+      "max_to_mean": 1.6661,
+      "norm_entropy": 0.9578,
+      "gini": 0.251,
+      "proxy_loss_last50": 17.8748
+    },
+    {
+      "mode": "emeans",
+      "splits": 32,
+      "dead_experts": 3,
+      "max_to_mean": 3.9459,
+      "norm_entropy": 0.8054,
+      "gini": 0.5329,
+      "proxy_loss_last50": 15.3021
+    }
+  ],
+  "gemma_architecture_profiles": [
+    {
+      "preset": "gemma-3-1b",
+      "E": 16,
+      "top_k": 2,
+      "strategy": "sliced_granular",
+      "dense_params_M": 999.87,
+      "moe_total_params_M": 5347.94,
+      "moe_active_params_M": 1000.35,
+      "unsharded_train_GB": 79.69,
+      "ema_sync_KB_per_step": 3.25
+    },
+    {
+      "preset": "gemma-3-1b",
+      "E": 16,
+      "top_k": 2,
+      "strategy": "noisy_clone",
+      "dense_params_M": 999.87,
+      "moe_total_params_M": 10316.62,
+      "moe_active_params_M": 1621.44,
+      "unsharded_train_GB": 153.73,
+      "ema_sync_KB_per_step": 3.25
+    },
+    {
+      "preset": "gemma-2-2b",
+      "E": 16,
+      "top_k": 2,
+      "strategy": "sliced_granular",
+      "dense_params_M": 2614.34,
+      "moe_total_params_M": 14208.88,
+      "moe_active_params_M": 2615.3,
+      "unsharded_train_GB": 211.73,
+      "ema_sync_KB_per_step": 3.25
+    },
+    {
+      "preset": "gemma-2-2b",
+      "E": 32,
+      "top_k": 2,
+      "strategy": "sliced_granular",
+      "dense_params_M": 2614.34,
+      "moe_total_params_M": 27459.65,
+      "moe_active_params_M": 2616.26,
+      "unsharded_train_GB": 409.18,
+      "ema_sync_KB_per_step": 6.5
+    },
+    {
+      "preset": "gemma-2-9b",
+      "E": 64,
+      "top_k": 4,
+      "strategy": "sliced_granular",
+      "dense_params_M": 9241.71,
+      "moe_total_params_M": 106359.97,
+      "moe_active_params_M": 9251.34,
+      "unsharded_train_GB": 1584.89,
+      "ema_sync_KB_per_step": 21.0
+    }
+  ]
+}
