@@ -140,14 +140,21 @@ class GemmaMoEMLPBlock(nn.Module):
 class GemmaMoEDecoderLayer(nn.Module):
     """Upcycled Gemma Decoder Layer replacing dense GeGLU MLP with GemmaMoEMLPBlock."""
 
+    input_layernorm: nn.Module
+    self_attn: nn.Module
+    post_attention_layernorm: nn.Module
+    pre_feedforward_layernorm: nn.Module
+    mlp: GemmaMoEMLPBlock
+    post_feedforward_layernorm: nn.Module
+
     def __init__(self, dense_layer: nn.Module, moe_mlp: GemmaMoEMLPBlock):
         super().__init__()
-        self.input_layernorm = dense_layer.input_layernorm
-        self.self_attn = dense_layer.self_attn
-        self.post_attention_layernorm = dense_layer.post_attention_layernorm
-        self.pre_feedforward_layernorm = dense_layer.pre_feedforward_layernorm
+        self.input_layernorm = cast(nn.Module, dense_layer.input_layernorm)
+        self.self_attn = cast(nn.Module, dense_layer.self_attn)
+        self.post_attention_layernorm = cast(nn.Module, dense_layer.post_attention_layernorm)
+        self.pre_feedforward_layernorm = cast(nn.Module, dense_layer.pre_feedforward_layernorm)
         self.mlp = moe_mlp
-        self.post_feedforward_layernorm = dense_layer.post_feedforward_layernorm
+        self.post_feedforward_layernorm = cast(nn.Module, dense_layer.post_feedforward_layernorm)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = x + self.post_attention_layernorm(self.self_attn(self.input_layernorm(x)))
@@ -192,7 +199,10 @@ class TinyGemmaMoEForCausalLM(nn.Module):
         self.embed_tokens = dense_model.embed_tokens
         self.layers = nn.ModuleList(
             [
-                GemmaMoEDecoderLayer(layer, upcycle_gemma_mlp_to_moe(layer.mlp, moe_cfg, layer_idx=idx))
+                GemmaMoEDecoderLayer(
+                    layer,
+                    upcycle_gemma_mlp_to_moe(cast(GemmaDenseDecoderLayer, layer).mlp, moe_cfg, layer_idx=idx),
+                )
                 for idx, layer in enumerate(dense_model.layers)
             ]
         )
@@ -203,7 +213,7 @@ class TinyGemmaMoEForCausalLM(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.embed_tokens(input_ids) * math.sqrt(self.spec.hidden_size)
         total_aux = x.new_zeros(())
-        for layer in self.layers:
+        for layer in self.iter_moe_layers():
             x = layer(x)
             r_out = layer.mlp.last_router_output
             if r_out is not None:
@@ -267,12 +277,16 @@ def upcycle_gemma_mlp_to_moe(dense_mlp: nn.Module, cfg: EMeansMoEConfig, layer_i
       - progressive_split: Only K0 initial experts get positive routing bias while E-K0 start
         dormant (bias = dormant_init_bias), letting DynamicExpertSplitter carve capacity online.
     """
-    hidden_size = dense_mlp.gate_proj.in_features
-    dense_ff = dense_mlp.gate_proj.out_features
+    gate_proj = cast(nn.Linear, dense_mlp.gate_proj)
+    up_proj = cast(nn.Linear, dense_mlp.up_proj)
+    down_proj = cast(nn.Linear, dense_mlp.down_proj)
 
-    w_gate = dense_mlp.gate_proj.weight.data
-    w_up = dense_mlp.up_proj.weight.data
-    w_down = dense_mlp.down_proj.weight.data
+    hidden_size = gate_proj.in_features
+    dense_ff = gate_proj.out_features
+
+    w_gate = gate_proj.weight.data
+    w_up = up_proj.weight.data
+    w_down = down_proj.weight.data
 
     if cfg.upcycle_strategy == "sliced_granular":
         if dense_ff % cfg.top_k != 0:
@@ -335,7 +349,7 @@ def upcycle_gemma_model(dense_model: nn.Module, cfg: EMeansMoEConfig) -> nn.Modu
 
     # Generic HF Gemma2ForCausalLM / Gemma3ForCausalLM support via attribute path
     cloned = copy.deepcopy(dense_model)
-    layers = getattr(getattr(cloned, "model", cloned), "layers")
+    layers = cast(nn.ModuleList, getattr(getattr(cloned, "model", cloned), "layers"))
     for idx, layer in enumerate(layers):
-        layer.mlp = upcycle_gemma_mlp_to_moe(layer.mlp, cfg, layer_idx=idx)
+        layer.mlp = upcycle_gemma_mlp_to_moe(cast(nn.Module, layer.mlp), cfg, layer_idx=idx)
     return cloned
