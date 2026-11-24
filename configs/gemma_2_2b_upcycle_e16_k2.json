@@ -18,7 +18,8 @@
     "orthogonal_eps": 0.001,
     "router_noise_eps": 0.0001,
     "cooldown_steps": 400,
-    "upcycle_strategy": "noisy_clone",
+    "upcycle_strategy": "sliced_parity",
+    "parity_bias_gap": 1.0,
     "upcycle_init_noise": 0.001
   },
   "training": {

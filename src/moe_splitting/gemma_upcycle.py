@@ -3,9 +3,10 @@ Config-faithful TinyGemma model and Sparse Upcycling utilities for Gemma 2 / Gem
 Runs 100% offline with synthetic weights; never downloads remote HuggingFace weights.
 """
 
+import contextlib
 import copy
 import math
-from typing import Dict, List, Optional, Tuple, cast, overload
+from typing import Iterator, List, Optional, Tuple, cast, overload
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,7 +14,9 @@ import torch.nn.functional as F
 from .config import EMeansMoEConfig, GemmaArchitectureSpec
 from .experts import GeGLUMoEExperts
 from .router import EMeansMoERouter, RouterOutput
-from .splitting import DynamicExpertSplitter, SplitEvent
+from .splitting import DynamicExpertSplitter, SplitEvent, UnmergeEvent
+
+UPCYCLE_STRATEGIES = ("noisy_clone", "sliced_granular", "sliced_parity", "progressive_split")
 
 
 class GemmaRMSNorm(nn.Module):
@@ -118,23 +121,98 @@ class GemmaDenseDecoderLayer(nn.Module):
 
 
 class GemmaMoEMLPBlock(nn.Module):
-    """Drop-in replacement for GemmaDenseGeGLUMLP holding router + GeGLU expert bank."""
+    """Drop-in replacement for a Gemma GeGLU MLP holding router + GeGLU expert bank.
 
-    def __init__(self, hidden_size: int, expert_intermediate_size: int, cfg: EMeansMoEConfig):
+    Routing statistics of the last forward are kept for `step_moe_blocks` only when the
+    block is in training mode and `record_stats` is True (see `frozen_moe_stats`), so an
+    evaluation or measurement forward never overwrites the statistics of a training batch.
+    The router stays fp32 whatever `dtype` the experts use.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        expert_intermediate_size: int,
+        cfg: EMeansMoEConfig,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__()
-        self.router = EMeansMoERouter(hidden_size, cfg)
-        self.experts = GeGLUMoEExperts(cfg.num_experts, hidden_size, expert_intermediate_size)
+        self.router = EMeansMoERouter(hidden_size, cfg).to(device=device)
+        self.experts = GeGLUMoEExperts(cfg.num_experts, hidden_size, expert_intermediate_size, device=device, dtype=dtype)
+        self.record_stats = True
         self.last_router_output: Optional[RouterOutput] = None
         self.last_batch_energy: Optional[torch.Tensor] = None
+        self.last_aux_loss: Optional[torch.Tensor] = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, d = x.shape
-        x_flat = x.reshape(B * L, d)
+        shape = x.shape
+        x_flat = x.reshape(-1, shape[-1])
         r_out = self.router(x_flat)
         out_flat, batch_energy = self.experts(x_flat, r_out.topk_idx, r_out.topk_weights)
-        self.last_router_output = r_out
-        self.last_batch_energy = batch_energy
-        return out_flat.view(B, L, d)
+        self.last_aux_loss = r_out.aux_loss + r_out.z_loss
+        if self.training and self.record_stats:
+            self.last_router_output = r_out
+            self.last_batch_energy = batch_energy
+        return out_flat.view(shape)
+
+
+def iter_moe_blocks(model: nn.Module) -> List[Tuple[str, GemmaMoEMLPBlock]]:
+    """All MoE blocks of a model (TinyGemma or HF Gemma 2/3 after `upcycle_gemma_model`)."""
+    return [(name, m) for name, m in model.named_modules() if isinstance(m, GemmaMoEMLPBlock)]
+
+
+@contextlib.contextmanager
+def frozen_moe_stats(model: nn.Module) -> Iterator[None]:
+    """Run forwards (e.g. loss measurements) without touching the stored routing statistics."""
+    blocks = [b for _, b in iter_moe_blocks(model)]
+    prev = [b.record_stats for b in blocks]
+    for b in blocks:
+        b.record_stats = False
+    try:
+        yield
+    finally:
+        for b, p in zip(blocks, prev):
+            b.record_stats = p
+
+
+@torch.no_grad()
+def step_moe_blocks(
+    model: nn.Module,
+    splitter: DynamicExpertSplitter,
+    optimizer: Optional[torch.optim.Optimizer],
+    step: int,
+    total_steps: int,
+    sync_distributed: bool = True,
+) -> Tuple[List[SplitEvent], List[UnmergeEvent]]:
+    """Per MoE block: update EMA statistics, un-merge separable sibling pairs, split if due.
+
+    Call once per optimizer step, after `optimizer.step()`. The stored statistics are
+    consumed, so a second call without a new training forward is a no-op.
+    """
+    split_events: List[SplitEvent] = []
+    unmerge_events: List[UnmergeEvent] = []
+    for name, blk in iter_moe_blocks(model):
+        r_out = blk.last_router_output
+        if r_out is None or blk.last_batch_energy is None:
+            continue
+        blk.router.update_ema(
+            r_out.batch_load,
+            blk.last_batch_energy,
+            step=step,
+            total_steps=total_steps,
+            sync_distributed=sync_distributed,
+            batch_sum=r_out.batch_sum,
+            batch_sqnorm=r_out.batch_sqnorm,
+            pair_disagree=r_out.pair_disagree,
+        )
+        blk.last_router_output = None
+        blk.last_batch_energy = None
+        unmerge_events.extend(splitter.maybe_unmerge_layer(blk.router, step=step, layer_name=name))
+        split_events.extend(
+            splitter.maybe_split_layer(blk.router, blk.experts, optimizer=optimizer, step=step, layer_name=name)
+        )
+    return split_events, unmerge_events
 
 
 class GemmaMoEDecoderLayer(nn.Module):
@@ -173,6 +251,18 @@ class TinyGemmaForCausalLM(nn.Module):
         self.norm = GemmaRMSNorm(spec.hidden_size, spec.rms_norm_eps)
         self.lm_head = nn.Linear(spec.hidden_size, spec.vocab_size, bias=False)
         self.lm_head.weight = self.embed_tokens.weight  # Gemma weight tying
+        self._init_weights()
+
+    @torch.no_grad()
+    def _init_weights(self) -> None:
+        """HF Gemma init: N(0, initializer_range) for Linear and Embedding, zero biases; the
+        unit-offset RMSNorm weights stay at zero."""
+        std = self.spec.initializer_range
+        for m in self.modules():
+            if isinstance(m, (nn.Linear, nn.Embedding)):
+                m.weight.normal_(0.0, std)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    m.bias.zero_()
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         # Gemma scales embeddings by sqrt(hidden_size)
@@ -209,15 +299,16 @@ class TinyGemmaMoEForCausalLM(nn.Module):
         self.norm = dense_model.norm
         self.lm_head = dense_model.lm_head
         self.splitter = DynamicExpertSplitter()
+        self.last_unmerge_events: List[UnmergeEvent] = []
+        self.unmerge_log: List[UnmergeEvent] = []
 
     def forward(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.embed_tokens(input_ids) * math.sqrt(self.spec.hidden_size)
         total_aux = x.new_zeros(())
         for layer in self.iter_moe_layers():
             x = layer(x)
-            r_out = layer.mlp.last_router_output
-            if r_out is not None:
-                total_aux = total_aux + r_out.aux_loss + r_out.z_loss
+            if layer.mlp.last_aux_loss is not None:
+                total_aux = total_aux + layer.mlp.last_aux_loss
         x = self.norm(x)
         logits = self.lm_head(x)
         if self.spec.final_logit_softcapping and self.spec.final_logit_softcapping > 0.0:
@@ -240,28 +331,14 @@ class TinyGemmaMoEForCausalLM(nn.Module):
         step: int,
         total_steps: int,
     ) -> List[SplitEvent]:
-        """Update per-layer EMA stats and trigger DynamicExpertSplitter when due."""
-        all_events: List[SplitEvent] = []
-        for idx, layer in enumerate(self.iter_moe_layers()):
-            moe_mlp = layer.mlp
-            if moe_mlp.last_router_output is None or moe_mlp.last_batch_energy is None:
-                continue
-            moe_mlp.router.update_ema(
-                moe_mlp.last_router_output.batch_load,
-                moe_mlp.last_batch_energy,
-                step=step,
-                total_steps=total_steps,
-                sync_distributed=True,
-            )
-            events = self.splitter.maybe_split_layer(
-                moe_mlp.router,
-                moe_mlp.experts,
-                optimizer=optimizer,
-                step=step,
-                layer_name=f"layer_{idx}",
-            )
-            all_events.extend(events)
-        return all_events
+        """Update per-layer EMA stats, un-merge separable sibling pairs, split when due.
+
+        Returns the split events; un-merge events go to `last_unmerge_events` / `unmerge_log`.
+        """
+        split_events, unmerge_events = step_moe_blocks(self, self.splitter, optimizer, step, total_steps)
+        self.last_unmerge_events = unmerge_events
+        self.unmerge_log.extend(unmerge_events)
+        return split_events
 
 
 @torch.no_grad()
@@ -270,13 +347,25 @@ def upcycle_gemma_mlp_to_moe(dense_mlp: nn.Module, cfg: EMeansMoEConfig, layer_i
     Convert a dense Gemma GeGLU MLP (having gate_proj, up_proj, down_proj) into a
     GemmaMoEMLPBlock without requiring remote downloads.
 
-    Strategies:
-      - noisy_clone: Full D_ff cloned to E experts (+ small noise); exact dense parity at noise=0.
-      - sliced_granular: Slice D_ff into E granular sub-experts of width D_ff / K_r
-        (for FLOP parity when summing Top-K_r experts without weighted attenuation).
-      - progressive_split: Only K0 initial experts get positive routing bias while E-K0 start
-        dormant (bias = dormant_init_bias), letting DynamicExpertSplitter carve capacity online.
+    Strategies (step-0 parity = the MoE reproduces the dense MLP before any training):
+      - noisy_clone: full D_ff cloned to E experts (+ upcycle_init_noise). Parity is exact at
+        noise=0 when K_r >= 2 with renormalised weights; at K_r = 1 the output is p_top1 * dense.
+      - sliced_parity: D_ff sliced into K_r pieces (expert j holds slice j % K_r, down_proj * K_r),
+        router rows zeroed, experts 0..K_r-1 (one per slice) tied at bias 0 and all others at
+        -parity_bias_gap, so every token selects exactly one expert per slice: exact parity at
+        noise=0 with dense-matched FLOPs. Requires K_r >= 2 and renorm_topk_weights.
+      - sliced_granular: same slicing with a random router. NOT parity-preserving: a token whose
+        Top-K holds two experts with the same slice drops part of the FFN (about half of the
+        tokens at E=16, K=2). Kept only as a comparison point.
+      - progressive_split: only K0 = progressive_active_experts experts are active; the others
+        start dormant (bias = dormant_init_bias, EMA load 0) for DynamicExpertSplitter to revive.
     """
+    if cfg.upcycle_strategy not in UPCYCLE_STRATEGIES:
+        raise ValueError(f"upcycle_strategy={cfg.upcycle_strategy!r} not in {UPCYCLE_STRATEGIES}")
+    sliced = cfg.upcycle_strategy in ("sliced_granular", "sliced_parity")
+    if cfg.upcycle_strategy == "sliced_parity" and (cfg.top_k < 2 or not cfg.renorm_topk_weights):
+        raise ValueError("sliced_parity needs top_k >= 2 and renorm_topk_weights=True (Top-1 weight is p_top1 < 1)")
+
     gate_proj = cast(nn.Linear, dense_mlp.gate_proj)
     up_proj = cast(nn.Linear, dense_mlp.up_proj)
     down_proj = cast(nn.Linear, dense_mlp.down_proj)
@@ -288,21 +377,22 @@ def upcycle_gemma_mlp_to_moe(dense_mlp: nn.Module, cfg: EMeansMoEConfig, layer_i
     w_up = up_proj.weight.data
     w_down = down_proj.weight.data
 
-    if cfg.upcycle_strategy == "sliced_granular":
+    if sliced:
         if dense_ff % cfg.top_k != 0:
             raise ValueError(f"intermediate_size={dense_ff} must be divisible by top_k={cfg.top_k}")
         exp_ff = dense_ff // cfg.top_k
     else:
         exp_ff = dense_ff
 
-    block = GemmaMoEMLPBlock(hidden_size, exp_ff, cfg)
+    # Experts on the dense weights' device and dtype; the router stays fp32 on that device.
+    block = GemmaMoEMLPBlock(hidden_size, exp_ff, cfg, device=w_gate.device, dtype=w_gate.dtype)
     gen = torch.Generator(device=w_gate.device).manual_seed(1337 + layer_idx * 97)
 
     for j in range(cfg.num_experts):
-        if cfg.upcycle_strategy == "sliced_granular":
+        if sliced:
             slice_id = j % cfg.top_k
             s0, s1 = slice_id * exp_ff, (slice_id + 1) * exp_ff
-            # Multiply down_proj by K_r so uniform weighted average sum_{k} (1/K_r) * y_k matches dense sum
+            # down_proj * K_r: the renormalised Top-K weights are 1/K_r per selected expert
             g_src = w_gate[s0:s1]
             u_src = w_up[s0:s1]
             d_src = w_down[:, s0:s1] * float(cfg.top_k)
@@ -316,8 +406,15 @@ def upcycle_gemma_mlp_to_moe(dense_mlp: nn.Module, cfg: EMeansMoEConfig, layer_i
         ):
             dst.copy_(src)
             if cfg.upcycle_init_noise > 0.0:
-                noise = torch.randn(src.shape, device=src.device, dtype=src.dtype, generator=gen)
-                dst.add_(cfg.upcycle_init_noise * noise)
+                noise = torch.randn(src.shape, device=src.device, dtype=torch.float32, generator=gen)
+                dst.add_((cfg.upcycle_init_noise * noise).to(dst.dtype))
+
+    if cfg.upcycle_strategy == "sliced_parity":
+        nn.init.zeros_(block.router.gate.weight)
+        nn.init.zeros_(block.router.gate.bias)
+        block.router.gate.bias[cfg.top_k:].fill_(-abs(cfg.parity_bias_gap))
+        block.router.ema_load.zero_()
+        block.router.ema_load[: cfg.top_k].fill_(1.0)
 
     if cfg.upcycle_strategy == "progressive_split":
         nn.init.zeros_(block.router.gate.bias)
@@ -341,8 +438,11 @@ def upcycle_gemma_model(dense_model: nn.Module, cfg: EMeansMoEConfig) -> nn.Modu
 
 def upcycle_gemma_model(dense_model: nn.Module, cfg: EMeansMoEConfig) -> nn.Module:
     """
-    Convert either TinyGemmaForCausalLM or a locally loaded HuggingFace Gemma model
-    into an auxiliary-loss-free MoE model in-place (never triggering downloads).
+    Convert either TinyGemmaForCausalLM or a locally loaded HuggingFace Gemma model into an
+    auxiliary-loss-free MoE model (on a deep copy; never triggers downloads).
+
+    For HF models only `layer.mlp` is replaced, so the HF decoder layer (attention masks,
+    caches, sliding windows) is untouched. Drive training with `step_moe_blocks(model, ...)`.
     """
     if isinstance(dense_model, TinyGemmaForCausalLM):
         return TinyGemmaMoEForCausalLM(copy.deepcopy(dense_model), cfg)

@@ -31,12 +31,16 @@ try:
     from .experts import GeGLUMoEExperts
     from .gemma_upcycle import (
         GemmaMoEDecoderLayer,
+        GemmaMoEMLPBlock,
         TinyGemmaForCausalLM,
         TinyGemmaMoEForCausalLM,
+        frozen_moe_stats,
+        iter_moe_blocks,
+        step_moe_blocks,
         upcycle_gemma_model,
     )
     from .router import EMeansMoERouter, RouterOutput
-    from .splitting import DynamicExpertSplitter, SplitEvent
+    from .splitting import DynamicExpertSplitter, SplitEvent, UnmergeEvent
 
     __all__ += [
         "GeGLUMoEExperts",
@@ -44,9 +48,14 @@ try:
         "RouterOutput",
         "DynamicExpertSplitter",
         "SplitEvent",
+        "UnmergeEvent",
         "GemmaMoEDecoderLayer",
+        "GemmaMoEMLPBlock",
         "TinyGemmaForCausalLM",
         "TinyGemmaMoEForCausalLM",
+        "frozen_moe_stats",
+        "iter_moe_blocks",
+        "step_moe_blocks",
         "upcycle_gemma_model",
     ]
 except ImportError:

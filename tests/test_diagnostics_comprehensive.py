@@ -169,26 +169,214 @@ class TestPoC1BaselinesAndCLISmoke(unittest.TestCase):
             self.assertLess(res_e["dead_experts"], res_u["dead_experts"], f"seed={seed}")
             self.assertGreater(res_e["norm_entropy"], res_u["norm_entropy"], f"seed={seed}")
 
-    def test_all_poc_cli_entrypoints_and_logs(self):
-        cmds = [
-            [sys.executable, "poc/poc_01_math_and_profiler.py"],
-            [sys.executable, "poc/poc_02_tiny_gemma_continuity.py", "--dry-run"],
-            [sys.executable, "poc/poc_03_proxy_collapse_and_scaling.py", "--dry-run"],
-            [sys.executable, "poc/poc_04_gemma3_1b_frozen_upcycle.py", "--synthetic-gemma", "--upcycle-last-n", "8", "--dry-run"],
-            [sys.executable, "poc/compile_poc_report.py"],
-            [sys.executable, "scripts/explore_gemma_architecture.py"],
-            [sys.executable, "scripts/plan_scaling_sweep.py"],
-        ]
-        for cmd in cmds:
-            proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False)
-            self.assertEqual(proc.returncode, 0, f"Command failed: {cmd}\nSTDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout}")
+    def test_poc01_simulation_is_deterministic(self):
+        a = poc1.run_synthetic_simulation("deepseek_bias", steps=120, seed=5)
+        b = poc1.run_synthetic_simulation("deepseek_bias", steps=120, seed=5)
+        self.assertEqual(a, b)
 
-        # Verify structured PoC 1 outputs, diagnostics, and logs exist cleanly
-        p1_json = json.loads((ROOT / "poc" / "results" / "poc_01_results.json").read_text(encoding="utf-8"))
-        self.assertTrue(p1_json["diagnostics"]["all_passed"])
-        for sub in ("poc_01", "poc_02", "poc_03", "poc_04", "compile_report"):
-            self.assertTrue((ROOT / "poc" / "logs" / sub / "latest.log").exists(), f"Missing log for {sub}")
-        self.assertTrue((ROOT / "poc" / "results" / "COMPILED-POC-REPORT.md").exists())
+    def test_poc01_topk_rows_separate_plain_from_sibling_routing(self):
+        rows = poc1.run_topk_invariance()
+        self.assertEqual({(r["tau_r"], r["top_k"]) for r in rows},
+                         {(t, k) for t in (0.5, 1.0, 2.0) for k in (1, 2, 4)})
+        self.assertLess(max(r["sibling_topk_max_output_diff"] for r in rows), 1e-12)
+        self.assertGreater(min(r["plain_topk_max_output_diff"] for r in rows), 1e-3)
+
+    def test_poc01_router_sync_counts_centroid_payload(self):
+        g = next(x for x in poc1.profile_gemma_targets() if x["preset"] == "gemma-3-1b")
+        spec = GEMMA_PRESETS["gemma-3-1b"]
+        expected_kb = spec.num_hidden_layers * g["E"] * (spec.hidden_size + 4) * 4 / 1024.0
+        self.assertAlmostEqual(g["router_stats_sync_KB_per_step"], round(expected_kb, 1), places=6)
+
+    def test_all_poc_cli_entrypoints_write_only_to_the_given_dirs(self):
+        """Every CLI runs with results and logs redirected to a temp dir; the repo is untouched."""
+        import os
+        import tempfile
+
+        tracked = [ROOT / "poc" / "results" / n for n in ("poc_01_results.json", "COMPILED-POC-REPORT.md")]
+        before = {t: (t.read_bytes() if t.exists() else None) for t in tracked}
+        with tempfile.TemporaryDirectory() as tmp:
+            res_dir, log_dir = pathlib.Path(tmp) / "results", pathlib.Path(tmp) / "logs"
+            env = dict(os.environ, MOE_POC_RESULTS_DIR=str(res_dir), MOE_POC_LOGS_DIR=str(log_dir))
+            cmds = [
+                [sys.executable, "poc/poc_01_math_and_profiler.py"],
+                [sys.executable, "poc/poc_02_tiny_gemma_continuity.py", "--dry-run"],
+                [sys.executable, "poc/poc_03_proxy_collapse_and_scaling.py", "--dry-run"],
+                [sys.executable, "poc/poc_04_gemma3_1b_frozen_upcycle.py", "--synthetic-gemma", "--upcycle-last-n", "2",
+                 "--dry-run"],
+                [sys.executable, "poc/compile_poc_report.py"],
+                [sys.executable, "scripts/explore_gemma_architecture.py"],
+                [sys.executable, "scripts/plan_scaling_sweep.py"],
+            ]
+            for cmd in cmds:
+                proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False, env=env)
+                self.assertEqual(proc.returncode, 0, f"{cmd}\nSTDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout}")
+            p1_json = json.loads((res_dir / "poc_01_results.json").read_text(encoding="utf-8"))
+            self.assertTrue(p1_json["diagnostics"]["all_passed"])
+            self.assertIn("comparison_informational", p1_json)
+            report = (res_dir / "COMPILED-POC-REPORT.md").read_text(encoding="utf-8")
+            self.assertIn("Top-K routing after the split", report)
+            self.assertIn("PoC 2 *(not run yet)*", report)
+            for sub in ("poc_01", "poc_02", "poc_03", "poc_04", "compile_report"):
+                self.assertTrue((log_dir / sub / "latest.log").exists(), f"missing log for {sub}")
+        after = {t: (t.read_bytes() if t.exists() else None) for t in tracked}
+        self.assertEqual(before, after, "a PoC CLI wrote into poc/results despite MOE_POC_RESULTS_DIR")
+
+    def test_poc03_invalid_ladders_are_rejected(self):
+        from poc import poc_03_proxy_collapse_and_scaling as poc3
+
+        for bad in (["--alpha-ladder", "0.01,0.02"], ["--alpha-ladder", "0.02,0.01,0.05"],
+                    ["--alpha-ladder", "0.01,0.02,0.2", "--alpha-0", "0.1"], ["--ff-dim", "250", "--grid-top-k", "3"]):
+            with self.assertRaises(SystemExit, msg=str(bad)):
+                poc3.parse_args(bad)
+
+
+class TestPoC3CellLogic(unittest.TestCase):
+    """The flat / at-edge rules that decide which cells enter the alpha_min fit."""
+
+    LADDER = [0.005, 0.02, 0.08]
+    KEY = dict(num_experts=8, top_k=2, batch_size=8, tokens_per_step=256, tau_r=1.0)
+
+    def _runs(self, losses_per_rung, seeds=1):
+        runs = []
+        for a, losses in zip(self.LADDER, losses_per_rung):
+            for s in range(seeds):
+                v = losses[s] if isinstance(losses, (list, tuple)) else losses
+                runs.append({"alpha_min": a, "val_loss": v, "all_finite": v is not None})
+        return runs
+
+    def _cell(self, losses, seeds=1, tol=0.01):
+        from poc import poc_03_proxy_collapse_and_scaling as poc3
+
+        return poc3.summarize_cell(dict(self.KEY), self._runs(losses, seeds), self.LADDER, seeds, tol)
+
+    def test_interior_optimum_is_usable(self):
+        c = self._cell([3.10, 3.00, 3.08])
+        self.assertTrue(c["usable"])
+        self.assertEqual(c["best_alpha"], 0.02)
+
+    def test_flat_ladder_is_excluded(self):
+        c = self._cell([3.004, 3.000, 3.006])
+        self.assertFalse(c["usable"])
+        self.assertEqual(c["reason"], "flat")
+
+    def test_edge_optimum_is_censored(self):
+        c = self._cell([2.90, 3.00, 3.10])
+        self.assertFalse(c["usable"])
+        self.assertEqual(c["reason"], "at_edge")
+
+    def test_seed_noise_raises_the_flat_threshold(self):
+        # a 0.05 range clears the 0.01 tolerance, but the two seeds disagree by ~0.3
+        c = self._cell([(3.05, 3.35), (3.00, 3.30), (3.05, 3.35)], seeds=2)
+        self.assertEqual(c["reason"], "flat")
+        self.assertGreater(c["noise_sem"], 0.1)
+
+    def test_non_finite_run_excludes_the_cell(self):
+        c = self._cell([3.1, None, 3.0])
+        self.assertEqual(c["reason"], "non-finite run")
+
+    def test_split_counts_are_recorded_per_rung_and_cell(self):
+        from poc import poc_03_proxy_collapse_and_scaling as poc3
+
+        runs = self._runs([3.004, 3.000, 3.006])
+        for r, n in zip(runs, (0, 2, 4)):
+            r["num_splits"] = n
+        c = poc3.summarize_cell(dict(self.KEY), runs, self.LADDER, 1, 0.01)
+        self.assertEqual([r["splits_mean"] for r in c["rungs"]], [0, 2, 4])
+        self.assertEqual(c["total_splits"], 6)
+
+        no_split = self._runs([3.0, 3.0, 3.0])
+        for r in no_split:
+            r["num_splits"] = 0
+        cells = [poc3.summarize_cell(dict(self.KEY), no_split, self.LADDER, 1, 0.01), c,
+                 self._cell([3.0, 3.0, 3.0])]                      # fixture without split counts
+        self.assertIsNone(cells[2]["total_splits"])
+        self.assertEqual(poc3.fit_usable_cells(cells)["n_no_splits"], 1)
+
+    def test_fit_reports_why_it_was_skipped(self):
+        from poc import poc_03_proxy_collapse_and_scaling as poc3
+
+        fit = poc3.fit_usable_cells([self._cell([3.10, 3.00, 3.08]), self._cell([3.0, 3.0, 3.0])])
+        self.assertEqual(fit["status"], "not_fitted")
+        self.assertEqual((fit["n_usable"], fit["n_flat"]), (1, 1))
+        self.assertIn("observations", fit["reason"])
+
+
+class TestScalingLawIdentifiability(unittest.TestCase):
+    @staticmethod
+    def _obs(bls=(1024, 2048, 4096), es=(8, 16, 32), ks=(1, 2), taus=(1.0,)):
+        out = []
+        for bl in bls:
+            for e in es:
+                for k in ks:
+                    for t in taus:
+                        out.append(ScalingObservation(bl, e, k, t, 0.01 * bl ** 0.3 * e ** -0.5 * k ** 0.2))
+        return out
+
+    def test_constant_feature_is_unidentified_and_prediction_refuses_it(self):
+        fit = fit_alpha_min_powerlaw(self._obs())
+        self.assertEqual(fit.unidentified, ("tau_r",))
+        self.assertTrue(math.isnan(fit.a_tau))
+        self.assertAlmostEqual(fit.a_bl, 0.3, places=6)
+        self.assertAlmostEqual(fit.a_e, -0.5, places=6)
+        self.assertGreater(fit.predict(2048, 16, 2, 1.0), 0.0)
+        with self.assertRaises(ValueError):
+            fit.predict(2048, 16, 2, 2.0)
+
+    def test_collinear_design_raises(self):
+        obs = [ScalingObservation(bl, bl / 128, 2.0, 1.0, 0.01 * bl ** 0.1) for bl in (1024, 2048, 4096, 8192)]
+        with self.assertRaises(ValueError):
+            fit_alpha_min_powerlaw(obs)
+
+    def test_too_few_observations_raise(self):
+        with self.assertRaises(ValueError):
+            fit_alpha_min_powerlaw(self._obs(bls=(1024, 2048), es=(8,), ks=(1,)))
+
+    def test_r2_is_nan_when_target_is_constant(self):
+        obs = [ScalingObservation(bl, e, 2.0, 1.0, 0.01) for bl in (1024, 2048, 4096) for e in (8, 16)]
+        self.assertTrue(math.isnan(fit_alpha_min_powerlaw(obs).r2_log))
+
+    def test_loso_skips_folds_that_leave_e_unidentified(self):
+        loso = evaluate_loso(self._obs(es=(8, 16)))
+        self.assertEqual(loso["n_folds_evaluated"], 0)
+        self.assertEqual(len(loso["skipped"]), 2)
+        loso3 = evaluate_loso(self._obs())
+        self.assertEqual(loso3["n_folds_evaluated"], 3)
+        self.assertLess(loso3["loso_mean_rel_err"], 1e-6)
+
+
+class TestReportCompiler(unittest.TestCase):
+    def test_compiler_renders_new_schemas_and_marks_missing_pocs(self):
+        import os
+        import tempfile
+
+        from poc import compile_poc_report as comp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = pathlib.Path(tmp)
+            p4 = {"poc_id": "poc_04", "model_id": "m", "upcycled_layers": ["layers.2.mlp"], "total_params_M": 7.0,
+                  "trainable_params_M": 6.0,
+                  "diagnostics": {"sanity": {"only_moe_params_trainable": True, "triggered_splits": False},
+                                  "sanity_passed": False,
+                                  "informational": {"heldout_loss_dense": 7.6, "heldout_loss_step0": 7.6,
+                                                    "heldout_loss_end": None, "upcycle_parity_gap": 1e-4,
+                                                    "dead_experts_start": 12.0, "dead_experts_end": 12.0,
+                                                    "num_splits": 0, "num_unmerges": 0,
+                                                    "routing_domain_info_end": None}}}
+            (d / "poc_04_results.json").write_text(json.dumps(p4), encoding="utf-8")
+            prev = os.environ.get("MOE_POC_LOGS_DIR")
+            os.environ["MOE_POC_LOGS_DIR"] = str(d / "logs")
+            try:
+                out = comp.main(["--results-dir", str(d)])
+            finally:
+                if prev is None:
+                    os.environ.pop("MOE_POC_LOGS_DIR", None)
+                else:
+                    os.environ["MOE_POC_LOGS_DIR"] = prev
+            text = out.read_text(encoding="utf-8")
+        self.assertIn("Sanity checks: FAIL", text)
+        self.assertIn("`triggered_splits`: FAIL", text)
+        self.assertIn("PoC 1 *(not run yet)*", text)
+        self.assertIn("after training n/a", text)
 
 
 if __name__ == "__main__":

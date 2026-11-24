@@ -30,6 +30,7 @@ from moe_splitting import (  # noqa: E402
     GEMMA_PRESETS,
     TinyGemmaForCausalLM,
     compute_routing_health,
+    frozen_moe_stats,
     upcycle_gemma_model,
 )
 
@@ -80,16 +81,25 @@ def main():
         total_loss.backward()
         optimizer.step()
 
+        # Split continuity: loss on the same batch right before and right after the split, both
+        # AFTER the optimizer step, in eval mode with routing statistics frozen, so the difference
+        # is the structural change only (not the optimizer update).
+        def same_batch_loss() -> float:
+            model.eval()
+            with torch.no_grad(), frozen_moe_stats(model):
+                lg, _ = model(batch)
+                val = F.cross_entropy(lg[:, :-1, :].reshape(-1, spec.vocab_size), batch[:, 1:].reshape(-1)).item()
+            model.train()
+            return val
+
+        pre_split = same_batch_loss() if step % moe_cfg.split_interval == 0 else None
         events = model.step_ema_and_split(optimizer, step=step, total_steps=total_steps)
         if events:
-            # Measure immediate post-split loss continuity on the exact same batch
-            with torch.no_grad():
-                post_logits, _ = model(batch)
-                post_loss = F.cross_entropy(post_logits[:, :-1, :].reshape(-1, spec.vocab_size), batch[:, 1:].reshape(-1))
+            post_split = same_batch_loss()
             print(
                 f"  Step {step:02d}: Split {len(events)} pairs "
                 f"(first: {events[0].layer_name} dead={events[0].dead_idx} <- donor={events[0].donor_idx}) | "
-                f"pre_loss={loss.item():.4f} -> post_loss={post_loss.item():.4f}"
+                f"same-batch loss {pre_split:.6f} -> {post_split:.6f} (dL={post_split - pre_split:+.2e})"
             )
         elif step in (1, 10, 25, 50):
             h0 = compute_routing_health(model.iter_moe_layers()[0].mlp.router.ema_load, top_k=moe_cfg.top_k, dead_tau=moe_cfg.split_tau)

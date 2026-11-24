@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from datetime import datetime
+import os
 import pathlib
 import platform
 import shutil
@@ -11,6 +12,21 @@ from typing import Iterator, Optional
 # Resolve <repo>/poc/logs cleanly regardless of working directory
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 LOGS_ROOT = REPO_ROOT / "poc" / "logs"
+RESULTS_ROOT = REPO_ROOT / "poc" / "results"
+
+
+def logs_root() -> pathlib.Path:
+    """`poc/logs`, or $MOE_POC_LOGS_DIR (tests point this at a temp dir)."""
+    env = os.environ.get("MOE_POC_LOGS_DIR")
+    return pathlib.Path(env) if env else LOGS_ROOT
+
+
+def results_root(override: Optional[str] = None) -> pathlib.Path:
+    """`poc/results`, or the --out-dir argument, or $MOE_POC_RESULTS_DIR."""
+    if override:
+        return pathlib.Path(override)
+    env = os.environ.get("MOE_POC_RESULTS_DIR")
+    return pathlib.Path(env) if env else RESULTS_ROOT
 
 
 class _TeeStream:
@@ -51,7 +67,7 @@ def tee_poc_logs(poc_name: str, run_tag: Optional[str] = None) -> Iterator[pathl
     Create `poc/logs/<poc_name>/run_<timestamp>.log`, mirror stdout & stderr cleanly,
     record system/CLI metadata, and update `poc/logs/<poc_name>/latest.log` on exit.
     """
-    log_dir = LOGS_ROOT / poc_name
+    log_dir = logs_root() / poc_name
     log_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = f"_{run_tag}" if run_tag else ""

@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from moe_splitting.config import GEMMA_PRESETS  # noqa: E402
-from moe_splitting.metrics import compute_routing_health  # noqa: E402
+from moe_splitting.metrics import compute_routing_health, expert_pairwise_cosine  # noqa: E402
 from moe_splitting.scaling_law import ScalingObservation, evaluate_loso, fit_alpha_min_powerlaw  # noqa: E402
 
 
@@ -71,6 +71,25 @@ class TestMoEMathInvariants(unittest.TestCase):
     def test_gemma_presets_present(self):
         for k in ("tiny-gemma-debug", "gemma-3-1b", "gemma-2-2b", "gemma-2-9b"):
             self.assertIn(k, GEMMA_PRESETS)
+
+
+class TestExpertDiversityMetric(unittest.TestCase):
+    def test_near_copy_pair_and_unrelated_pair(self):
+        w = np.random.default_rng(0).normal(size=(4, 3, 5))
+        w[3] = w[1] * (1.0 + 1e-3)
+        r = expert_pairwise_cosine(w, [(1, 3), (0, 2)])
+        self.assertAlmostEqual(r["pair_cos"][0], 1.0, places=9)
+        self.assertAlmostEqual(r["pair_rel_diff"][0], 1e-3, places=9)
+        self.assertLess(r["pair_cos"][1], 0.9)
+        self.assertAlmostEqual(r["max_cos"], 1.0, places=9)
+        self.assertLessEqual(r["mean_cos"], r["max_cos"])
+
+    def test_scale_invariant_and_degenerate_inputs(self):
+        w = np.random.default_rng(1).normal(size=(3, 8))
+        a = expert_pairwise_cosine(w)["mean_cos"]
+        self.assertAlmostEqual(a, expert_pairwise_cosine(7.0 * w)["mean_cos"], places=12)
+        one = expert_pairwise_cosine(w[:1])
+        self.assertTrue(math.isnan(one["max_cos"]) and one["pair_cos"] == [])
 
 
 if __name__ == "__main__":

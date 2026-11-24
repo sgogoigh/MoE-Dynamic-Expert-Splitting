@@ -1,6 +1,6 @@
-"""Routing health metrics shared across NumPy simulations and PyTorch runs."""
+"""Routing health and expert diversity metrics shared across NumPy simulations and PyTorch runs."""
 
-from typing import Dict
+from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 
 
@@ -8,7 +8,7 @@ def _to_numpy(arr) -> np.ndarray:
     if isinstance(arr, np.ndarray):
         return arr.astype(np.float64, copy=False)
     if hasattr(arr, "detach"):
-        return arr.detach().cpu().to(dtype=None).numpy().astype(np.float64, copy=False)
+        return arr.detach().float().cpu().numpy().astype(np.float64, copy=False)  # .float(): bf16 has no numpy dtype
     return np.asarray(arr, dtype=np.float64)
 
 
@@ -57,3 +57,36 @@ def compute_routing_health(load_vec, top_k: int, dead_tau: float = 0.1) -> Dict[
         "norm_entropy": norm_entropy,
         "gini": max(0.0, gini),
     }
+
+
+def expert_pairwise_cosine(expert_weights, pairs: Optional[Sequence[Tuple[int, int]]] = None) -> Dict[str, object]:
+    """Cosine similarity between experts' flattened weights, shape (E, ...).
+
+    Two siblings right after a split have cosine ~1 (they differ by the small split noise);
+    a pair whose cosine stays near 1 has not diverged. Returns the max and mean over distinct
+    pairs and, for each requested (a, b), its cosine and its relative difference
+    ||w_a - w_b|| / ||w_a|| (more readable than 1 - cos for near-copies). NaN when E < 2.
+    """
+    w = _to_numpy(expert_weights)
+    num = w.shape[0]
+    w = w.reshape(num, -1)
+    norms = np.maximum(np.linalg.norm(w, axis=1, keepdims=True), 1e-12)
+    cos = (w / norms) @ (w / norms).T
+    iu = np.triu_indices(num, 1)
+    off = cos[iu]
+    pairs = list(pairs or [])
+    return {
+        "max_cos": float(off.max()) if off.size else float("nan"),
+        "mean_cos": float(off.mean()) if off.size else float("nan"),
+        "pair_cos": [float(cos[a, b]) for a, b in pairs],
+        "pair_rel_diff": [float(np.linalg.norm(w[a] - w[b]) / norms[a, 0]) for a, b in pairs],
+    }
+
+
+def moe_expert_weights(experts):
+    """(E, P) tensor of each expert's gate/up/down weights flattened (GeGLUMoEExperts layout)."""
+    import torch
+
+    num = experts.gate_proj.shape[0]
+    return torch.cat([experts.gate_proj.detach().reshape(num, -1), experts.up_proj.detach().reshape(num, -1),
+                      experts.down_proj.detach().reshape(num, -1)], dim=1)

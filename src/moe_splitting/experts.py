@@ -1,6 +1,6 @@
 """GeGLU Expert Bank compatible with Gemma 2 / Gemma 3 MLP weights."""
 
-from typing import Tuple
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,16 +16,24 @@ class GeGLUMoEExperts(nn.Module):
     orthogonal noise injection, and clean AdamW optimizer state migration.
     """
 
-    def __init__(self, num_experts: int, hidden_size: int, intermediate_size: int):
+    def __init__(
+        self,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__()
         self.num_experts = num_experts
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
         std = 0.02
-        self.gate_proj = nn.Parameter(torch.randn(num_experts, intermediate_size, hidden_size) * std)
-        self.up_proj = nn.Parameter(torch.randn(num_experts, intermediate_size, hidden_size) * std)
-        self.down_proj = nn.Parameter(torch.randn(num_experts, hidden_size, intermediate_size) * std)
+        kw = {"device": device, "dtype": dtype}
+        self.gate_proj = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size, **kw).normal_(0.0, std))
+        self.up_proj = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size, **kw).normal_(0.0, std))
+        self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size, **kw).normal_(0.0, std))
 
     def forward(
         self,

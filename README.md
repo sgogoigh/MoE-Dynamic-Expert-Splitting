@@ -41,12 +41,29 @@ python scripts/mini_run_math_verify.py
 python scripts/plan_scaling_sweep.py
 
 # 4. Run offline mathematical unit tests
-python -m unittest discover -s tests -p "*numpy*.py" -v
+python -m unittest discover -s tests -p "*numpy*.py" -v      # numpy-only modules
 ```
 
-### Cluster / PyTorch Dry-Run (On a GPU Node with `torch` Installed)
+### PyTorch (CPU is enough for everything below)
 ```bash
-# Upcycles offline TinyGemma -> asserts exact forward parity -> injects collapse -> splits -> 50 AdamW steps
+# CPU-only torch in a local venv (Windows paths; on Linux/macOS use .venv/bin/python)
+python -m venv .venv
+.venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv\Scripts\python -m pip install numpy transformers safetensors pytest
+
+# Upcycles offline TinyGemma -> parity check -> 50 AdamW steps, printing each split's same-batch loss change
 python scripts/mini_run_gemma_upcycle_torch.py
-pytest tests/
+
+# Every test module (unittest; pytest also works). The torch suites take a few minutes on CPU.
+python -m unittest discover -s tests -v
+python scripts/run_all_diagnostics.py      # same, plus a JSON scorecard; exit 2 if torch is missing
 ```
+
+### What is and is not established
+- **Split continuity under Top-K routing**: the `-tau_r ln 2` bias shift preserves only the dense softmax mixture. Under hard Top-K it needs **sibling routing**: the split pair holds one Top-K slot and the token goes to the more probable sibling. With it, the measured split loss change is 0, against up to 0.047 nats for plain Top-K (PoC 2, tiny Gemma). See [`docs/basic-terms/04`](./docs/basic-terms/04-Function-Preserving-Splitting-and-Adam-State.md), section 3b.
+- **Open: un-merging.** In the CPU runs, sibling experts diverged in weight space (relative difference 0.23 to 0.36) but the router never separated them, so every un-merge was forced. Forced un-merges are ramped, so no single step jumps. Their total cost (+0.104 and −0.002 nats per 4-pair episode) is the same order as a plain Top-K split. Merged experts cannot donate again until they un-merge, so active experts at most double per `merge_max_steps` cycle (PoC 4: 4 → 8, then no further splits within 200 steps).
+- **Open: the CPU proxies barely collapse.** e-means splits only experts below the dead threshold (0.1× fair share). With the HF-matching init:
+  - In PoC 2 Part B and PoC 3 Part A, no expert got that low, so e-means never split and matched the unbalanced baseline exactly.
+  - In PoC 3 Part B it split only 1–2 times per run, and all 8 α_min cells were flat, so no scaling law was fitted.
+  - Splitting is properly exercised only in PoC 2 Part A (forced `progressive_split`) and PoC 4 (upcycling starts experts dead).
+- **Comparisons are toy-scale.** In the PoC 1 toy simulation (3 seeds), e-means beats the unbalanced baseline. DeepSeek-V3 bias balancing beats e-means on dead experts and balance on every seed, and the aux-loss stand-in matches or beats it on most. PoC 2 Part B and PoC 3 are informational CPU runs. None of this is evidence at scale.

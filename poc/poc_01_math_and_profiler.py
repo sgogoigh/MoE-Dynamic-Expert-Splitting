@@ -14,16 +14,22 @@ STANDALONE RUN INSTRUCTIONS (ANY MACHINE — WINDOWS / LINUX / MAC / COLAB):
              python poc/compile_poc_report.py
 
 WHAT TO EXPECT:
-  - Runtime         : ~1-3 seconds.
-  - Console Output  :
-      1. Softmax probability & MoE output difference <= 1e-15 across tau_r in {0.5, 1.0, 2.5}.
-      2. 400-step multi-domain synthetic routing table comparing unbalanced, aux_loss,
-         deepseek_bias, and emeans (dead experts, max/mean load, entropy, splits).
+  - Runtime         : a few seconds.
+  - Sanity checks (gating; properties of the math):
+      1. Dense softmax mixture after the -tau ln2 split: output difference ~1e-15.
+      2. Top-K routing after the split: plain Top-K changes the output (the control); sibling
+         routing (the pair holds one Top-K slot) reproduces it exactly, K in {1, 2, 4}.
+      3. Router statistics all-reduce (E x (d+4) fp32 per layer and step, dominated by the token
+         sum used for the centroid split) stays below 1% of the bf16 gradient all-reduce.
+  - Informational: a TOY routing simulation (plain Top-K, hand-written rich-get-richer router
+    update) over several seeds comparing unbalanced, aux_loss, deepseek_bias and emeans. It
+    illustrates the balancing dynamics; it is not the implementation and proves nothing at scale.
   - Saved Artifacts :
-      * Telemetry JSON : `poc/results/poc_01_results.json`
+      * Telemetry JSON : `<out-dir>/poc_01_results.json` (default `poc/results`)
       * Run Log File   : `poc/logs/poc_01/run_<YYYYMMDD_HHMMSS>.log` (+ `latest.log`)
 """
 
+import argparse
 import json
 import math
 import pathlib
@@ -36,7 +42,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from moe_splitting.config import GEMMA_PRESETS  # noqa: E402
 from moe_splitting.metrics import compute_routing_health  # noqa: E402
-from moe_splitting.poc_logging import tee_poc_logs  # noqa: E402
+from moe_splitting.poc_logging import results_root, tee_poc_logs  # noqa: E402
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -86,6 +92,64 @@ def run_invariance_proof() -> list:
                 "max_moe_output_diff": float(np.max(np.abs(y_after - y_before))),
             }
         )
+    return rows
+
+
+def _topk_mix(probs: np.ndarray, outputs: np.ndarray, k: int, partner=None) -> np.ndarray:
+    """Renormalised Top-K MoE output. With `partner` (a sibling pair), the pair competes for
+    one slot with its summed probability and the token goes to the more probable sibling."""
+    T, E = probs.shape
+    owner = np.arange(E)
+    if partner is not None:
+        a, b = partner
+        owner[b] = a
+    group_p = np.zeros_like(probs)
+    np.add.at(group_p.T, owner, probs.T)
+    y = np.zeros((T, outputs.shape[-1]))
+    for t in range(T):
+        reps = [g for g in np.argsort(-group_p[t], kind="stable") if owner[g] == g][:k]
+        chosen = []
+        for g in reps:
+            members = [e for e in range(E) if owner[e] == g]
+            best = max(members, key=lambda e: (probs[t, e], -e))
+            chosen.append((best, group_p[t, g]))
+        z = sum(w for _, w in chosen)
+        for e, w in chosen:
+            y[t] += (w / z) * outputs[e, t]
+    return y
+
+
+def run_topk_invariance() -> list:
+    """The -tau ln2 split preserves the dense softmax mixture but not plain Top-K routing:
+    the two siblings at p/2 each can both enter the Top-K (dropping another expert) or both
+    fall out of it. Sibling routing (pair = one Top-K slot, token -> the more probable sibling)
+    restores exact invariance. Exact-copy split (no hyperplane offset); the torch tests cover
+    the offset case."""
+    rng = np.random.default_rng(11)
+    T, d, E = 96, 16, 10
+    X = rng.normal(size=(T, d))
+    W_r = rng.normal(scale=0.6, size=(E, d))
+    b = rng.normal(scale=0.3, size=(E,))
+    j_donor, j_dead = 2, 7
+    b[j_donor] = 1.2
+    b[j_dead] = -1e9
+    outputs = rng.normal(size=(E, T, d))
+    outputs[j_dead] = outputs[j_donor]
+    rows = []
+    for tau_r in (0.5, 1.0, 2.0):
+        for k in (1, 2, 4):
+            p0 = _softmax((X @ W_r.T + b[None, :]) / tau_r)
+            y0 = _topk_mix(p0, outputs, k)
+            W1, b1 = W_r.copy(), b.copy()
+            W1[j_dead] = W1[j_donor]
+            b1[j_donor] = b1[j_dead] = b[j_donor] - tau_r * math.log(2.0)
+            p1 = _softmax((X @ W1.T + b1[None, :]) / tau_r)
+            rows.append({
+                "tau_r": tau_r,
+                "top_k": k,
+                "plain_topk_max_output_diff": float(np.max(np.abs(_topk_mix(p1, outputs, k) - y0))),
+                "sibling_topk_max_output_diff": float(np.max(np.abs(_topk_mix(p1, outputs, k, (j_donor, j_dead)) - y0))),
+            })
     return rows
 
 
@@ -221,59 +285,97 @@ def profile_gemma_targets() -> list:
                 "moe_total_params_M": round(moe_total / 1e6, 2),
                 "moe_active_params_M": round(moe_active / 1e6, 2),
                 "unsharded_train_GB": round((moe_total * 16.0) / (1024 ** 3), 2),
-                "ema_sync_KB_per_step": round((L * 2 * e_cnt * 4) / 1024.0, 2),
+                # per layer and step the router all-reduces load, energy, token sum (E x d, for the
+                # centroid split), squared norm and pair disagreement: E * (d + 4) fp32 values
+                "router_stats_sync_KB_per_step": round((L * e_cnt * (d + 4) * 4) / 1024.0, 1),
+                "bf16_grad_sync_MB_per_step": round(moe_total * 2.0 / 1024 ** 2, 1),
             }
         )
+    for p in profiles:
+        p["router_sync_frac_of_grad_sync"] = round(p["router_stats_sync_KB_per_step"] / 1024.0
+                                                   / p["bf16_grad_sync_MB_per_step"], 5)
     return profiles
 
 
-def main():
+SIM_MODES = ("unbalanced", "aux_loss", "deepseek_bias", "emeans")
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description="PoC 1: invariance proofs, toy routing simulation, Gemma audit")
+    ap.add_argument("--seeds", type=int, nargs="+", default=[123, 456, 789], help="toy simulation seeds")
+    ap.add_argument("--steps", type=int, default=400)
+    ap.add_argument("--out-dir", default=None)
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     with tee_poc_logs("poc_01"):
-        out_dir = POC_DIR / "results"
+        out_dir = results_root(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         invariance = run_invariance_proof()
-        simulations = [run_synthetic_simulation(m) for m in ("unbalanced", "aux_loss", "deepseek_bias", "emeans")]
+        topk = run_topk_invariance()
+        per_seed = {s: {m: run_synthetic_simulation(m, steps=args.steps, seed=s) for m in SIM_MODES} for s in args.seeds}
+        simulations = [dict(per_seed[args.seeds[0]][m]) for m in SIM_MODES]  # first seed, kept for the report table
         gemma_profiles = profile_gemma_targets()
 
-        sim_by_mode = {r["mode"]: r for r in simulations}
         max_inv_diff = max(r["max_moe_output_diff"] for r in invariance)
-        diagnostics = {
+        max_sib = max(r["sibling_topk_max_output_diff"] for r in topk)
+        min_plain = min(r["plain_topk_max_output_diff"] for r in topk)
+        # Sanity checks gate the PoC: they are properties of the math, not of the toy dynamics.
+        sanity = {
             "softmax_invariance_lt_1e12": max_inv_diff < 1e-12,
-            "unbalanced_baseline_collapses": (
-                sim_by_mode["unbalanced"]["dead_experts"] >= 8
-                and sim_by_mode["unbalanced"]["max_to_mean"] > 4.0
-            ),
-            "emeans_revives_dead_vs_unbalanced": (
-                sim_by_mode["emeans"]["splits"] > 0
-                and sim_by_mode["emeans"]["dead_experts"] < sim_by_mode["unbalanced"]["dead_experts"]
-            ),
-            "emeans_improves_entropy_vs_unbalanced": (
-                sim_by_mode["emeans"]["norm_entropy"] > sim_by_mode["unbalanced"]["norm_entropy"]
-            ),
-            "gemma_ema_sync_under_25kb": all(g["ema_sync_KB_per_step"] <= 25.0 for g in gemma_profiles),
+            "sibling_topk_invariance_lt_1e12": max_sib < 1e-12,
+            "control_plain_topk_breaks_invariance": min_plain > 1e-3,
+            "router_sync_lt_1pct_of_grad_sync": all(g["router_sync_frac_of_grad_sync"] < 0.01 for g in gemma_profiles),
         }
-        diagnostics["all_passed"] = all(diagnostics.values())
+
+        def holds(pred):
+            return {str(s): bool(pred(per_seed[s])) for s in args.seeds}
+
+        # Informational: the toy simulation (plain Top-K, hand-written rich-get-richer router
+        # update) illustrates the balancing dynamics; it is not the implementation.
+        comparison = {
+            "unbalanced_collapses": holds(lambda r: r["unbalanced"]["dead_experts"] >= 8 and r["unbalanced"]["max_to_mean"] > 4.0),
+            "emeans_fewer_dead_than_unbalanced": holds(lambda r: r["emeans"]["splits"] > 0 and r["emeans"]["dead_experts"] < r["unbalanced"]["dead_experts"]),
+            "emeans_higher_entropy_than_unbalanced": holds(lambda r: r["emeans"]["norm_entropy"] > r["unbalanced"]["norm_entropy"]),
+            "emeans_fewer_dead_than_aux_loss": holds(lambda r: r["emeans"]["dead_experts"] < r["aux_loss"]["dead_experts"]),
+            "emeans_higher_entropy_than_aux_loss": holds(lambda r: r["emeans"]["norm_entropy"] > r["aux_loss"]["norm_entropy"]),
+            "emeans_fewer_dead_than_deepseek_bias": holds(lambda r: r["emeans"]["dead_experts"] < r["deepseek_bias"]["dead_experts"]),
+        }
+        diagnostics = dict(sanity)
+        diagnostics["all_passed"] = all(sanity.values())
 
         payload = {
             "poc_id": "poc_01",
-            "title": "Offline Invariance Proof, Synthetic Routing Comparison & Gemma Architecture Audit",
+            "title": "Offline invariance proofs, toy routing simulation and Gemma architecture audit",
             "invariance_proof": invariance,
+            "topk_invariance": topk,
             "synthetic_simulation": simulations,
+            "synthetic_simulation_per_seed": {str(s): list(r.values()) for s, r in per_seed.items()},
             "gemma_architecture_profiles": gemma_profiles,
             "diagnostics": diagnostics,
+            "comparison_informational": comparison,
         }
         out_path = out_dir / "poc_01_results.json"
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         print("=== PoC 1 COMPLETE ===")
-        print(f"Max softmax invariance diff across all tau_r: {max_inv_diff:.3e}")
-        for row in simulations:
-            print(
-                f"  {row['mode']:<15} | splits={row['splits']:2d} | dead={row['dead_experts']:2d} | "
-                f"max/mean={row['max_to_mean']:.2f}x | entropy={row['norm_entropy']:.3f}"
-            )
-        print(f"Baseline Diagnostics Passed: {diagnostics['all_passed']} -> {diagnostics}")
+        print(f"Dense softmax mixture, max output diff over tau_r: {max_inv_diff:.3e}")
+        print(f"Top-K after split: plain routing min/max diff {min_plain:.3e}/"
+              f"{max(r['plain_topk_max_output_diff'] for r in topk):.3e} | sibling routing max diff {max_sib:.3e}")
+        for s in args.seeds:
+            print(f"  toy simulation, seed {s}:")
+            for m in SIM_MODES:
+                row = per_seed[s][m]
+                print(f"    {m:<15} | splits={row['splits']:2d} | dead={row['dead_experts']:2d} | "
+                      f"max/mean={row['max_to_mean']:.2f}x | entropy={row['norm_entropy']:.3f}")
+        for g in gemma_profiles:
+            print(f"  {g['preset']:<11} E={g['E']:<3} K={g['top_k']} {g['strategy']:<16} router sync "
+                  f"{g['router_stats_sync_KB_per_step']:.0f} KB/step = {100 * g['router_sync_frac_of_grad_sync']:.3f}% of bf16 grad sync")
+        print(f"Sanity passed: {diagnostics['all_passed']} -> {sanity}")
+        print(f"Informational (per seed): {comparison}")
         print(f"Saved JSON telemetry -> {out_path}")
 
 
